@@ -13,6 +13,8 @@ import {
   serverTimestamp, getCountFromServer
 } from 'firebase/firestore';
 import Avatar from '../../components/Avatar';
+import BottomNav from '../../components/BottomNav';
+import { rankPosts } from '../../lib/ranking';
 
 const { width } = Dimensions.get('window');
 const GAP = 8, PADDING_H = 16;
@@ -63,9 +65,13 @@ export default function ProfileScreen() {
   useEffect(() => {
     if (!uid) return;
     const qy = query(collection(db, 'submissions'), where('uid', '==', String(uid)), orderBy('createdAt', 'desc'));
-    const unsub = onSnapshot(qy, (snap) => setPosts(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Post[]));
+    const unsub = onSnapshot(qy, (snap) => {
+      const arr = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Post[];
+      const ranked = rankPosts(arr, { me }); // ordenar grid por popularidad (además de createdAt)
+      setPosts(ranked);
+    });
     return () => unsub();
-  }, [uid]);
+  }, [uid, me]);
 
   const refreshCounts = useCallback(async () => {
     try {
@@ -163,6 +169,9 @@ export default function ProfileScreen() {
         initialNumToRender={9}
         windowSize={7}
       />
+
+      {/* Menú inferior */}
+      <BottomNav />
     </LinearGradient>
   );
 }

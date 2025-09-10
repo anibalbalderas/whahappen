@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, memo } from 'react';
 import { View, Text, TouchableOpacity, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -19,6 +19,27 @@ const MOODS = [
   { key: 'troll',      label: 'Troll',      icon: 'game-controller-outline' },
   { key: 'chill',      label: 'Chill',      icon: 'leaf-outline' },
 ];
+
+// 🔮 Fondo decorativo estilo glow
+const BackgroundDecor = memo(() => (
+  <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}>
+    <LinearGradient
+      colors={['rgba(124,77,255,0.28)', 'rgba(124,77,255,0.0)']}
+      start={{ x: 0.1, y: 0.0 }} end={{ x: 0.9, y: 1 }}
+      style={{ position: 'absolute', width: 320, height: 320, borderRadius: 160, top: -80, left: -80, transform: [{ rotate: '18deg' }] }}
+    />
+    <LinearGradient
+      colors={['rgba(255,77,222,0.22)', 'rgba(255,77,222,0.0)']}
+      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+      style={{ position: 'absolute', width: 260, height: 260, borderRadius: 130, top: 220, right: -70, transform: [{ rotate: '-12deg' }] }}
+    />
+    <LinearGradient
+      colors={['rgba(0,210,255,0.18)', 'rgba(0,210,255,0.0)']}
+      start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }}
+      style={{ position: 'absolute', width: 420, height: 420, borderRadius: 210, bottom: -140, left: '15%', transform: [{ rotate: '25deg' }] }}
+    />
+  </View>
+));
 
 export default function Home() {
   const r = useRouter();
@@ -56,7 +77,6 @@ export default function Home() {
   }, []);
 
   const choose = async (mode: string) => {
-    // Si ya hay lock y es distinto, bloquear
     if (lockedMode && lockedMode !== mode && left > 0) {
       Alert.alert('Reto elegido', `Hoy ya elegiste: #${lockedMode}. Te quedan ${formatCountdown(left)}.`);
       return;
@@ -74,6 +94,8 @@ export default function Home() {
 
   return (
     <LinearGradient colors={['#0b0b0d', '#000']} style={{ flex: 1 }}>
+      <BackgroundDecor />
+
       <SafeAreaView style={{ flex: 1, padding: 20, paddingBottom: 20 + insets.bottom }}>
         <Text style={{ color: 'white', fontSize: 30, fontWeight: '900' }}>WhaHappen</Text>
 
@@ -86,7 +108,7 @@ export default function Home() {
           <Text style={{ color: '#fff', opacity: 0.9, fontSize: 12 }}>Reto de hoy</Text>
           <Text style={{ color: '#fff', fontWeight: '900', fontSize: 24, marginTop: 4 }}>GLOBAL</Text>
           <Text style={{ color: '#fff', opacity: 0.85, marginTop: 4 }}>
-            Toca para revelar el reto y grabar (se bloqueará por 30 min)
+            Toca para revelar el reto y grabar
           </Text>
 
           <TouchableOpacity

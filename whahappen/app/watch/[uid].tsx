@@ -15,10 +15,12 @@ import {
   setDoc, deleteDoc, updateDoc, increment, addDoc, getDoc
 } from 'firebase/firestore';
 import Avatar from '../../components/Avatar';
+import BottomNav from '../../components/BottomNav';
+import { rankPosts } from '../../lib/ranking';
 
 const { width, height } = Dimensions.get('window');
 
-/** 🔮 Fondo decorativo estilo login/register */
+/** 🔮 Fondo decor */
 const BackgroundDecor = memo(() => (
   <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}>
     <LinearGradient
@@ -58,6 +60,7 @@ export default function WatchUser() {
   const me = auth.currentUser?.uid || null;
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const CAPTION_BOTTOM = (insets.bottom || 12) + 80; // ↑ para no tapar con BottomNav
 
   const [items, setItems] = useState<any[]>([]);
   const [active, setActive] = useState(0);
@@ -89,15 +92,16 @@ export default function WatchUser() {
   useEffect(() => {
     const qy = query(collection(db, 'submissions'), where('uid', '==', String(uid)), orderBy('createdAt', 'desc'));
     const unsub = onSnapshot(qy, (snap) => {
-      const arr = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-      setItems(arr);
+      let arr = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+      const ranked = rankPosts(arr, { me }); // ranking por popularidad
+      setItems(ranked);
 
       const lc: Record<string, { likes: number; comments: number }> = {};
       arr.forEach(p => lc[p.id] = { likes: p.likesCount || 0, comments: p.commentsCount || 0 });
       setLocalCounts(lc);
 
       if (sid) {
-        const idx = arr.findIndex(x => x.id === sid);
+        const idx = ranked.findIndex(x => x.id === sid);
         if (idx >= 0) setActive(idx);
       }
 
@@ -212,7 +216,7 @@ export default function WatchUser() {
     return `@user-${uid.slice(0, 5)}`;
   };
 
-  // ---- UI: Sheet Comentarios con padding lateral y en input ----
+  // ---- UI: Sheet Comentarios ----
   const CommentSheet = memo(({ postId }: { postId: string }) => {
     const list = comments[postId] || [];
     return (
@@ -320,6 +324,13 @@ export default function WatchUser() {
           </TouchableOpacity>
         </View>
 
+        {/* Search (más grande) */}
+        <View style={{ position: 'absolute', top: (insets.top || 16) + 8, right: 12, zIndex: 20 }}>
+          <TouchableOpacity onPress={() => router.push('/search')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="search" size={30} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
         {/* Corazón grande */}
         <Animated.View pointerEvents="none" style={{
           position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
@@ -328,8 +339,8 @@ export default function WatchUser() {
           <Ionicons name="heart" size={120} color="#ff2d55" />
         </Animated.View>
 
-        {/* Username + hashtag + caption */}
-        <View style={{ position: 'absolute', left: 14, bottom: 72, right: 110 }}>
+        {/* Username + hashtag + caption — más arriba */}
+        <View style={{ position: 'absolute', left: 14, bottom: CAPTION_BOTTOM, right: 110 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
             <TouchableOpacity onPress={() => router.push(`/profile/${item.uid}`)}>
               <Text style={{ color: 'white', fontWeight: '900' }}>{authorName}</Text>
@@ -392,6 +403,7 @@ export default function WatchUser() {
         onViewableItemsChanged={onViewableItemsChanged}
         viewabilityConfig={{ viewAreaCoveragePercentThreshold: 80 }}
       />
+      <BottomNav />
     </View>
   );
 }

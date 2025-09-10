@@ -15,6 +15,8 @@ import {
   getDoc, addDoc, limit, increment, updateDoc
 } from 'firebase/firestore';
 import Avatar from '../components/Avatar';
+import BottomNav from '../components/BottomNav';
+import { rankPosts } from '../lib/ranking';
 
 const { height, width } = Dimensions.get('window');
 
@@ -83,6 +85,9 @@ export default function Feed() {
   const insets = useSafeAreaInsets();
   const me = auth.currentUser?.uid || null;
 
+  // margen inferior extra para que no tape el BottomNav
+  const CAPTION_BOTTOM = (insets.bottom || 12) + 80;
+
   const [posts, setPosts] = useState<Post[]>([]);
   const [active, setActive] = useState(0);
   const [likes, setLikes] = useState<Record<string, boolean>>({});
@@ -115,7 +120,8 @@ export default function Feed() {
     const unsub = onSnapshot(qy, (snap) => {
       let arr = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Post[];
       if (me) arr = [...arr].sort((a, b) => (a.uid === me ? -1 : 0) - (b.uid === me ? -1 : 0));
-      setPosts(arr);
+      const ranked = rankPosts(arr, { me });
+      setPosts(ranked);
 
       const lc: Record<string, { likes: number; comments: number }> = {};
       arr.forEach(p => lc[p.id] = { likes: p.likesCount || 0, comments: p.commentsCount || 0 });
@@ -241,7 +247,6 @@ export default function Feed() {
     return inline ? `@user-${uid.slice(0, 5)}` : `@user`;
   };
 
-  // --- UI: Comentarios (sin cambios de lógica) ---
   const CommentSheet = memo(({ postId }: { postId: string }) => {
     const list = comments[postId] || [];
     return (
@@ -327,7 +332,7 @@ export default function Feed() {
 
     return (
       <View style={{ width, height, backgroundColor: 'black' }}>
-        {/* Overlay suave para tintar el video, no tapa interacción */}
+        {/* Overlay */}
         <LinearGradient
           colors={['rgba(11,11,13,0.35)', 'rgba(0,0,0,0)']}
           style={{ position: 'absolute', width, height }}
@@ -352,8 +357,15 @@ export default function Feed() {
           <Ionicons name="heart" size={120} color="#ff2d55" />
         </Animated.View>
 
-        {/* Info (username + caption + hashtag) */}
-        <View style={{ position: 'absolute', left: 14, bottom: 72, right: 110 }}>
+        {/* Lupa arriba-derecha (más grande) */}
+        <View style={{ position:'absolute', top:(insets.top||12)+8, right:12, zIndex:20 }}>
+          <TouchableOpacity onPress={()=>router.push('/search')} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+            <Ionicons name="search" size={30} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Info (username + caption + hashtag) — más arriba */}
+        <View style={{ position: 'absolute', left: 14, bottom: CAPTION_BOTTOM, right: 110 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
             <TouchableOpacity onPress={() => router.push(`/profile/${item.uid}`)}>
               <Text style={{ color: 'white', fontWeight: '900' }}>{authorName}</Text>
@@ -418,6 +430,7 @@ export default function Feed() {
         initialNumToRender={3}
         removeClippedSubviews
       />
+      <BottomNav />
     </View>
   );
 }
