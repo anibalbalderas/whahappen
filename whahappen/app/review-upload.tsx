@@ -183,6 +183,7 @@ export default function ReviewUpload() {
         videoPath: filePath,
         videoURL: url,
         caption: caption?.trim?.() || '',
+        status: "public",
         likesCount: 0,
         commentsCount: 0,
         createdAt: serverTimestamp(),

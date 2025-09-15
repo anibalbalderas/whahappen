@@ -1,18 +1,7 @@
-// functions/src/ai.ts
-//
-// Generador de retos diarios guiado por señales reales (semilla + topTags + topStyles).
-// - NO inicializa firebase-admin (no usar initializeApp aquí).
-// - Usa OPENAI_API_KEY desde process.env (asegúrate de declarar el secreto en el cron con setGlobalOptions).
-//
-// Params:
-//   - seedInstruction: instrucción del reto mejor rankeado de AYER (puede ser null)
-//   - topTags: tags más usados ayer (["duet","remix",...])
-//   - topStyles: estilos más usados ayer (["humor","cinemático",...])
-//   - wantCategories: claves EXACTAS a devolver (["global","caritativo",...])
-//   - preferCategory: modo que mejor rindió ayer (para orientar el tono)
-// Return: Record<string,string> con una línea por categoría (sin emojis, sin hashtags, grabable <30s).
+import { defineSecret } from "firebase-functions/params";
 
-import OpenAI from "openai";
+// 👉 Secreto exportado desde aquí para reutilizar en otras funciones
+export const OPENAI_SECRET = defineSecret("OPENAI_API_KEY");
 
 export type IdeaParams = {
   seedInstruction?: string | null;
@@ -25,168 +14,132 @@ export type IdeaParams = {
 export type IdeaMap = Record<string, string>;
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const OPENAI_KEY = process.env.OPENAI_API_KEY as string;
 
-// ---------- Utilidades de texto ----------
+// ---------- utils ----------
 function uniqLower(a: string[] = []): string[] {
+  const out: string[] = [];
   const seen = new Set<string>();
   for (const s of a) {
     const k = (s || "").toString().trim().toLowerCase();
-    if (!k) continue;
-    if (!seen.has(k)) seen.add(k);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
   }
-  return [...seen];
+  return out;
 }
 
 function sanitizeLine(s: string): string {
   if (!s) return s;
-  // sin comillas envolventes, sin emojis comunes, sin hashtags
   let out = s.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
   out = out.replace(/[#🎉✨🔥💥😁😂😍👍🏆🎵🎬🎧🎤🎮🎯💡🧠]/g, "");
-  // colapsa espacios
   out = out.replace(/\s+/g, " ").trim();
-  // evita instrucciones demasiado largas
   if (out.length > 220) out = out.slice(0, 220);
   return out;
 }
 
-function fallbackLine(category: string, preferCategory?: string, topTags: string[] = []): string {
-  const tag = topTags[0] ? ` usando el tag ${topTags[0]}` : "";
-  const tono = preferCategory && preferCategory !== "global" ? ` con vibra ${preferCategory}` : "";
-  return `Graba un clip corto (<20s) que cuente algo auténtico${tono}${tag}; que sea claro desde los 3 primeros segundos.`;
+function fallbackLine(category: string, prefer?: string, tags: string[] = []) {
+  const tag = tags[0] ? ` usando el tag ${tags[0]}` : "";
+  const tono = prefer && prefer !== "global" ? ` con vibra ${prefer}` : "";
+  return `Crea un clip <30s${tono}${tag} que enganche en los primeros 3s.`;
 }
 
-// Intenta extraer el primer bloque JSON válido del texto
-function extractJsonBlock(s: string): any | null {
+function extractJson(s: string): any | null {
   if (!s) return null;
-  try {
-    return JSON.parse(s);
-  } catch {
-    // Busca el primer {...} grande
-    const first = s.indexOf("{");
-    const last = s.lastIndexOf("}");
-    if (first >= 0 && last > first) {
-      const chunk = s.slice(first, last + 1);
-      try {
-        return JSON.parse(chunk);
-      } catch {
-        return null;
-      }
-    }
-    return null;
+  try { return JSON.parse(s); } catch {}
+  const i = s.indexOf("{"); const j = s.lastIndexOf("}");
+  if (i >= 0 && j > i) {
+    try { return JSON.parse(s.slice(i, j + 1)); } catch {}
   }
+  return null;
 }
 
-function ensureAllCategories(
-  raw: any,
-  want: string[],
-  preferCategory?: string,
-  topTags: string[] = []
-): IdeaMap {
+function ensureAll(raw: any, want: string[], prefer?: string, tags: string[] = []): IdeaMap {
   const out: IdeaMap = {};
   for (const k of want) {
     const v = typeof raw?.[k] === "string" ? raw[k] : "";
-    out[k] = sanitizeLine(v) || fallbackLine(k, preferCategory, topTags);
+    out[k] = sanitizeLine(v) || fallbackLine(k, prefer, tags);
   }
   return out;
 }
 
-// ---------- Prompting ----------
-function buildSystemPrompt() {
+function systemPrompt() {
   return [
-    "Eres planner creativo para retos diarios virales de video (tipo Reels/TikTok).",
-    "Objetivo: generar instrucciones grabables en <20s, acción directa, claridad en 3s.",
-    "Entregas SOLO un objeto JSON con claves EXACTAS de las categorías solicitadas.",
-    "Cada valor es UNA línea de instrucción, sin emojis, sin hashtags, sin comillas.",
-    "Evita referencias a marcas, política, violencia o temas sensibles.",
+    "Eres planner creativo de retos diarios de video.",
+    "Entrega SOLO un objeto JSON con las claves pedidas.",
+    "Cada valor: UNA línea, grabable en <30s, sin emojis, sin hashtags, sin comillas."
   ].join(" ");
 }
 
-function buildUserPrompt(params: Required<Omit<IdeaParams, "seedInstruction">> & { seedInstruction: string | null }) {
-  const { seedInstruction, topTags, topStyles, wantCategories, preferCategory } = params;
-
-  const stylesTxt = topStyles.length ? topStyles.join(", ") : "ninguno";
-  const tagsTxt = topTags.length ? topTags.join(", ") : "ninguno";
-  const seedTxt = seedInstruction ? seedInstruction : "null";
-
-  // Nota: idioma de salida en ES neutro, conciso, listo para ejecutar.
+function userPrompt(p: Required<Omit<IdeaParams,"seedInstruction">> & { seedInstruction: string | null }) {
+  const styles = p.topStyles.length ? p.topStyles.join(", ") : "ninguno";
+  const tags = p.topTags.length ? p.topTags.join(", ") : "ninguno";
+  const seed = p.seedInstruction ?? "null";
   return `
-Genera nuevas instrucciones de reto diario a partir de señales reales.
-
 Semilla (mejor reto de ayer, puede ser null):
-${seedTxt}
+${seed}
 
-Estilos más usados ayer: [${stylesTxt}]
-Tags más usados ayer: [${tagsTxt}]
-Categoría con mejor desempeño: ${preferCategory ?? "global"}
+Estilos más usados: [${styles}]
+Tags más usados: [${tags}]
+Categoría con mejor desempeño: ${p.preferCategory}
 
-Requisitos:
-- Devuelve SOLO JSON válido (sin texto extra) con claves EXACTAS: ${JSON.stringify(wantCategories)}
-- Cada valor: UNA línea, clara, accionable, grabable en <20s, sin emojis, sin hashtags, sin comillas.
-- Mantén variedad entre categorías (no repitas literal la semilla).
-- Integra de forma natural los estilos/tags más usados cuando tenga sentido.
-- Español neutro, directo (imperativo amable).
-  `.trim();
+Devuelve SOLO JSON válido con claves EXACTAS: ${JSON.stringify(p.wantCategories)}
+Cada valor: UNA línea, clara, accionable, <30s, sin emojis/hashtags/comillas. Español neutro.
+`.trim();
 }
 
-// ---------- LLM call ----------
-async function callLLMToJson(promptSystem: string, promptUser: string): Promise<any | null> {
-  const rsp = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.7,
-    messages: [
-      { role: "system", content: promptSystem },
-      { role: "user", content: promptUser },
-    ],
-    // Pedimos “JSON-ish”; algunos modelos obedecen mejor con esta pista:
-    response_format: { type: "json_object" as any },
+async function callOpenAI(sys: string, usr: string) {
+  if (!OPENAI_KEY) throw new Error("OPENAI_API_KEY no está definido");
+  const rsp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.7,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: usr },
+      ]
+    }),
   });
-
-  const content = rsp.choices?.[0]?.message?.content || "";
-  return extractJsonBlock(content);
+  if (!rsp.ok) {
+    const text = await rsp.text().catch(()=> "");
+    throw new Error(`OpenAI ${rsp.status}: ${text}`);
+  }
+  const data = await rsp.json();
+  const content = data?.choices?.[0]?.message?.content || "";
+  return extractJson(content);
 }
 
-// ---------- API principal ----------
 export async function generateChallengeIdeas(input: IdeaParams): Promise<IdeaMap> {
-  const wantCategories = (input.wantCategories || []).map((s) => (s || "").toString().trim()).filter(Boolean);
-  if (wantCategories.length === 0) {
-    throw new Error("generateChallengeIdeas: wantCategories no puede estar vacío.");
-  }
+  const want = (input.wantCategories || []).map(s => (s || "").trim()).filter(Boolean);
+  if (!want.length) throw new Error("wantCategories no puede estar vacío.");
 
   const topTags = uniqLower(input.topTags);
   const topStyles = uniqLower(input.topStyles);
-  const preferCategory = (input.preferCategory || "global").toString();
+  const prefer = (input.preferCategory || "global").toString();
 
-  const sys = buildSystemPrompt();
-  const usr = buildUserPrompt({
+  const sys = systemPrompt();
+  const usr = userPrompt({
     seedInstruction: input.seedInstruction ?? null,
-    topTags,
-    topStyles,
-    wantCategories,
-    preferCategory,
+    topTags, topStyles, wantCategories: want, preferCategory: prefer
   });
 
-  let raw = null;
-  try {
-    raw = await callLLMToJson(sys, usr);
-  } catch (err) {
-    // Si el modelo falla o no hay clave, seguimos con fallback
-    console.error("generateChallengeIdeas LLM error:", (err as Error)?.message);
-  }
+  let raw: any = null;
+  try { raw = await callOpenAI(sys, usr); }
+  catch (e) { console.error("generateChallengeIdeas error:", (e as Error).message); }
 
-  const ideas = ensureAllCategories(raw, wantCategories, preferCategory, topTags);
-
-  // post-proceso adicional: quitar líneas vacías o redundantes
+  const ideas = ensureAll(raw, want, prefer, topTags);
   for (const k of Object.keys(ideas)) {
     let line = sanitizeLine(ideas[k]);
-    // Pequeña heurística: evita que todas empiecen igual
     if (/^graba un clip corto/i.test(line) && input.seedInstruction) {
       line = line.replace(/^graba un clip corto/i, "Crea un clip corto");
     }
     ideas[k] = line;
   }
-
   return ideas;
 }

@@ -1,194 +1,219 @@
+// functions/src/schedule-challenges.ts
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { setGlobalOptions } from "firebase-functions/v2";
-import { defineSecret } from "firebase-functions/params";
-import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 import { db } from "./firebaseAdmin";
-import { generateChallengeIdeas } from "./ai";
+import { generateChallengeIdeas, OPENAI_SECRET } from "./ai";
 
-const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
+/**
+ * Ajustes clave:
+ * - DocID de challenges = YYYYMMDD (compat con UI vieja)
+ * - Campo key (ISO) = YYYY-MM-DD
+ * - Incluye generatedAt, basedOn, signals
+ * - Sanitiza '#' en instrucciones
+ */
 
-setGlobalOptions({
-  region: "us-central1",
-  secrets: [OPENAI_API_KEY],
-});
+const TZ = "America/Matamoros";
+const CATEGORIES = ["global", "caritativo", "picaro", "creativo", "rebelde", "troll", "chill"];
 
+// ---------- helpers de tiempo ----------
+function nowTZ() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+}
+function startOfDayTZ(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function endOfDayTZ(d: Date) {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+function keyIso(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function keyCompact(d: Date) {
+  return keyIso(d).replace(/-/g, "");
+}
+function todayIso() {
+  return keyIso(nowTZ());
+}
+function todayCompact() {
+  return keyCompact(nowTZ());
+}
+function yesterdayCompact() {
+  const y = nowTZ();
+  y.setDate(y.getDate() - 1);
+  return keyCompact(y);
+}
+function endOfTomorrowTS() {
+  const z = nowTZ();
+  z.setDate(z.getDate() + 1);
+  return Timestamp.fromDate(endOfDayTZ(z));
+}
+
+// ---------- helpers de agregación ----------
 type Subm = {
-  dateKey?: string;
-  mode?: string;              // "global" | "caritativo" | ...
-  tags?: string[];            // ["duet","remix",...]
-  style?: string;             // "humor" | "cinematico" | ...
+  uid?: string;
+  authorId?: string;
+  mode?: string;
+  dateKey?: string; // esperamos YYYYMMDD
+  status?: string;
+  tags?: string[];
+  style?: string;
   likesCount?: number;
   viewsCount?: number;
   repostsCount?: number;
-  score?: number;             // si ya calculas un score, úsalo
-  status?: string;            // "public" o similar
+  score?: number;
 };
 
-const TZ = "America/Matamoros";
-const WANT_CATEGORIES = [
-  "global", "caritativo", "picaro", "creativo", "rebelde", "troll", "chill",
-];
-
-function nowInTZ(tz: string): Date {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: tz }));
-}
-function dayKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
-}
-function todayKey(): string {
-  return dayKey(nowInTZ(TZ));
-}
-function yesterdayKey(): string {
-  const z = nowInTZ(TZ);
-  z.setDate(z.getDate() - 1);
-  return dayKey(z);
-}
-function endOfTomorrow(): Timestamp {
-  const z = nowInTZ(TZ);
-  z.setDate(z.getDate() + 1);
-  z.setHours(23, 59, 59, 999);
-  return Timestamp.fromDate(z);
-}
-
-// -------- helpers de agregación --------
 type CountMap = Map<string, number>;
+const add = (m: CountMap, k: string, w: number) => {
+  if (!k) return;
+  m.set(k, (m.get(k) ?? 0) + w);
+};
+const topK = (m: CountMap, k = 5) =>
+  [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, k).map(([x]) => x);
+const weight = (s: Subm) =>
+  typeof s.score === "number"
+    ? Math.max(1, s.score!)
+    : 1 + (s.likesCount ?? 0) * 2 + (s.repostsCount ?? 0) * 3 + (s.viewsCount ?? 0) * 0.05;
 
-function add(counts: CountMap, key: string, w: number) {
-  if (!key) return;
-  counts.set(key, (counts.get(key) ?? 0) + w);
+async function collectSignals(dateKeyCompact: string) {
+  const tagC: CountMap = new Map();
+  const styC: CountMap = new Map();
+  const modeC: CountMap = new Map();
+
+  const qs = await db
+    .collection("submissions")
+    .where("dateKey", "==", dateKeyCompact) // ✅ compact
+    .where("status", "==", "public")
+    .limit(5000)
+    .get();
+
+  qs.forEach((doc) => {
+    const s = doc.data() as Subm;
+    const w = weight(s);
+    (s.tags ?? []).forEach((t) => add(tagC, (t || "").toLowerCase(), w));
+    if (s.style) add(styC, (s.style || "").toLowerCase(), w);
+    if (s.mode) add(modeC, s.mode, w);
+  });
+
+  return {
+    topTags: topK(tagC, 6),
+    topStyles: topK(styC, 6),
+    bestMode: topK(modeC, 1)[0] ?? "global",
+  };
 }
 
-function sortTop(counts: CountMap, limit = 5): string[] {
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([k]) => k);
-}
-
-function weightFrom(sub: Subm): number {
-  // Pondera engagement; ajusta a tu gusto.
-  const likes = sub.likesCount ?? 0;
-  const views = sub.viewsCount ?? 0;
-  const reposts = sub.repostsCount ?? 0;
-  const base = 1;
-  // Si ya tienes un score calculado, priorízalo:
-  if (typeof sub.score === "number") return Math.max(base, sub.score);
-  return base + likes * 2 + reposts * 3 + views * 0.05;
-}
-
-async function fetchTopSignals(fromKey: string, lookbackDays = 0) {
-  // Lee submissions de un día; si lookbackDays > 0, lee rango [fromKey - lookbackDays, fromKey]
-  const tagCounts: CountMap = new Map();
-  const styleCounts: CountMap = new Map();
-  const modeScores: CountMap = new Map(); // suma de weights por modo
-
-  const keys: string[] = [];
-  if (lookbackDays <= 0) {
-    keys.push(fromKey);
-  } else {
-    const start = nowInTZ(TZ);
-    for (let i = lookbackDays; i >= 0; i--) {
-      const d = new Date(start);
-      d.setDate(d.getDate() - i);
-      keys.push(dayKey(d));
-    }
-  }
-
-  // Nota: si tu colección es grande, considera paginar por dateKey+status con índices compuestos.
-  for (const k of keys) {
-    const q = await db.collection("submissions")
-      .where("dateKey", "==", k)
-      .where("status", "==", "public") // ajusta si usas otro campo
-      .limit(2000) // defensa básica
-      .get();
-
-    q.forEach(doc => {
-      const sub = doc.data() as Subm;
-      const w = weightFrom(sub);
-
-      (sub.tags ?? []).forEach(t => add(tagCounts, t.toLowerCase(), w));
-      if (sub.style) add(styleCounts, sub.style.toLowerCase(), w);
-      if (sub.mode) add(modeScores, sub.mode, w);
-    });
-  }
-
-  const topTags = sortTop(tagCounts, 6);
-  const topStyles = sortTop(styleCounts, 6);
-  const bestMode = sortTop(modeScores, 1)[0] ?? "global";
-
-  return { topTags, topStyles, bestMode };
-}
-
-async function fetchSeedInstruction(prevKey: string, bestMode: string): Promise<string | null> {
-  const snap = await db.doc(`challenges/${prevKey}`).get();
+async function seedFromYesterday(prevCompact: string, mode: string) {
+  const snap = await db.doc(`challenges/${prevCompact}`).get(); // ✅ compact
   if (!snap.exists) return null;
   const data = snap.data() as any;
-  if (bestMode === "global") {
-    return data?.global?.instruction ?? null;
-  }
-  return data?.categories?.[bestMode]?.instruction ?? null;
+  if (mode === "global") return data?.global?.instruction ?? null;
+  return data?.categories?.[mode]?.instruction ?? null;
 }
 
-// ------------- CRON -------------
+const stripHash = (s: string) => (s ? s.replace(/[#\uFF03]/g, "") : s);
+
+// ---------- función programada ----------
 export const ensureDailyChallenges = onSchedule(
-  { schedule: "1 0 * * *", timeZone: TZ },
+  { schedule: "1 0 * * *", timeZone: TZ, secrets: [OPENAI_SECRET] },
   async () => {
-    const key = todayKey();
-    const ref = db.doc(`challenges/${key}`);
+    // Claves
+    const keyISO = todayIso(); // e.g. 2025-09-15
+    const keyCMP = todayCompact(); // e.g. 20250915
+
+    // Si ya existe, no rehacer
+    const ref = db.doc(`challenges/${keyCMP}`); // ✅ compact ID
     const exists = await ref.get();
     if (exists.exists) return;
 
-    const prevKey = yesterdayKey();
+    // Señales de ayer (o fallback 7 días)
+    const prev = yesterdayCompact();
+    let { topTags, topStyles, bestMode } = await collectSignals(prev);
 
-    // 1) Señales de AYER
-    let { topTags, topStyles, bestMode } = await fetchTopSignals(prevKey, 0);
-
-    // Fallback: 7 días si ayer estuvo flojo
     if (topTags.length === 0 && topStyles.length === 0) {
-      const { topTags: t2, topStyles: s2, bestMode: m2 } = await fetchTopSignals(prevKey, 7);
-      topTags = t2;
-      topStyles = s2;
-      bestMode = m2;
+      const start = nowTZ(); // hoy
+      const tagC: CountMap = new Map();
+      const styC: CountMap = new Map();
+      const modeC: CountMap = new Map();
+
+      for (let i = 7; i >= 1; i--) {
+        const d = new Date(start);
+        d.setDate(d.getDate() - i);
+        const k = keyCompact(d);
+        const qs = await db
+          .collection("submissions")
+          .where("dateKey", "==", k)
+          .where("status", "==", "public")
+          .limit(2000)
+          .get();
+        qs.forEach((doc) => {
+          const s = doc.data() as Subm;
+          const w = weight(s);
+          (s.tags ?? []).forEach((t) => add(tagC, (t || "").toLowerCase(), w));
+          if (s.style) add(styC, (s.style || "").toLowerCase(), w);
+          if (s.mode) add(modeC, s.mode, w);
+        });
+      }
+      topTags = topK(tagC, 6);
+      topStyles = topK(styC, 6);
+      bestMode = topK(modeC, 1)[0] ?? "global";
     }
 
-    // 2) Semilla: instrucción del reto del modo ganador de AYER
-    const seedInstruction = await fetchSeedInstruction(prevKey, bestMode);
+    // Semilla: mejor reto de ayer en el modo ganador
+    const seedInstruction = await seedFromYesterday(prev, bestMode);
 
-    // 3) Generar ideas NUEVAS con base en la semilla y señales reales
+    // Pide ideas al modelo
     const ideas = await generateChallengeIdeas({
-      seedInstruction,             // ← si es null, la IA debe manejar fallback
-      topTags,                     // ← provenientes de submissions
-      topStyles,                   // ← provenientes de submissions
-      wantCategories: WANT_CATEGORIES,
-      preferCategory: bestMode,    // ← sugiere priorizar ese “tono” o línea
+      seedInstruction,
+      topTags,
+      topStyles,
+      wantCategories: CATEGORIES,
+      preferCategory: bestMode,
     });
 
-    // 4) Armar doc de hoy
-    const docData: any = {
-      key,
+    // Construye documento con compatibilidad vieja + nueva
+    const today = nowTZ();
+    const windowStart = startOfDayTZ(new Date(today)); // hoy 00:00 (ajusta si quieres 7 días reales)
+    windowStart.setDate(windowStart.getDate() - 7);
+    const windowEnd = nowTZ();
+
+    const doc: any = {
+      // claves y tiempos
+      key: keyISO,                 // ISO (nuevo)
+      keyCompact: keyCMP,          // compacto (aux)
+      generatedAt: Timestamp.now(),// ✅ compat viejo
       createdAt: Timestamp.now(),
-      expiresAt: endOfTomorrow(),
-      global: {
-        instruction:
-          ideas["global"] ??
-          (seedInstruction
-            ? `Remix del reto: ${seedInstruction}`
-            : "Reto global del día: crea un clip corto que atrape en 3s."),
+      expiresAt: endOfTomorrowTS(),
+
+      // compat viejo
+      basedOn: {
+        days: 7,
+        windowStart: Timestamp.fromDate(windowStart),
+        windowEnd: Timestamp.fromDate(windowEnd),
+      },
+      signals: {
+        topTags,
+        topStyles,
+        bestMode,
+        examples: [] as string[],
+      },
+
+      // instrucciones
+      global: { instruction: stripHash(ideas["global"] ?? "Cuenta algo épico en 15s.") },
+      categories: {},
     };
-    docData.categories = {};
-    for (const c of WANT_CATEGORIES.filter(c => c !== "global")) {
-      docData.categories[c] = {
-        instruction:
-          ideas[c] ??
-          (seedInstruction
-            ? `Versión ${c} del reto de ayer: ${seedInstruction}`
-            : `Reto #${c}: sube tu take en <30s.`),
-      };
+
+    for (const c of CATEGORIES.filter((c) => c !== "global")) {
+      const line = ideas[c] ?? `Reto #${c}: sube tu take en <30s.`;
+      doc.categories[c] = { instruction: stripHash(line) };
     }
 
-    await ref.set(docData, { merge: false });
+    await ref.set(doc, { merge: false });
   }
 );

@@ -1,225 +1,163 @@
-// functions/src/trending.ts
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { onRequest } from "firebase-functions/v2/https";
-import { OPENAI_API_KEY, generateChallengeIdeas } from "./ai";
+import { onCall } from "firebase-functions/v2/https";
+import { Timestamp } from "firebase-admin/firestore";
+import { db } from "./firebaseAdmin";
+import { generateChallengeIdeas, OPENAI_SECRET } from "./ai";
 
-// 👇 Usa el SDK modular de Firestore Admin
-import {
-  getFirestore,
-  FieldValue,
-  Timestamp,
-} from "firebase-admin/firestore";
-import * as admin from "firebase-admin";
+const TZ = "America/Matamoros";
 
-if (admin.apps.length === 0) {
-  admin.initializeApp();
-}
-const db = getFirestore();
-
-const CATEGORIES = [
-  "global",
-  "caritativo",
-  "picaro",
-  "creativo",
-  "rebelde",
-  "troll",
-  "chill",
-] as const;
-
-type CategoryKey = (typeof CATEGORIES)[number];
-
-type SignalExample = {
-  caption?: string;
-  tag?: string;
-  mood?: string;
-  sample?: string;
+type Subm = {
+  id?: string;
+  uid?: string;
+  mode?: string;
+  dateKey?: string;
+  status?: string;
+  tags?: string[];
+  style?: string;
+  likesCount?: number;
+  viewsCount?: number;
+  repostsCount?: number;
+  score?: number;
 };
 
-type SignalSummary = {
-  topTags: string[];
-  topMoods: string[];
-  examples: SignalExample[];
+function nowTZ() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+}
+function keyFrom(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function todayKey() {
+  return keyFrom(nowTZ());
+}
+
+type CountMap = Map<string, number>;
+const add = (m: CountMap, k: string, w: number) => {
+  if (!k) return;
+  m.set(k, (m.get(k) ?? 0) + w);
 };
+const topK = (m: CountMap, k = 5) =>
+  [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, k).map(([x]) => x);
+const weight = (s: Subm) =>
+  typeof s.score === "number"
+    ? Math.max(1, s.score!)
+    : 1 + (s.likesCount ?? 0) * 2 + (s.repostsCount ?? 0) * 3 + (s.viewsCount ?? 0) * 0.05;
 
-function dateKey(d = new Date()): string {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
-}
-
-function daysAgo(n: number): Date {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d;
-}
-
-/** Score con decay temporal (comentarios pesan más que likes). */
-function scoreOf(
-  x: FirebaseFirestore.DocumentData,
-  nowMs: number
-): number {
-  const likes = Number(x.likesCount || 0);
-  const comments = Number(x.commentsCount || 0);
-
-  let createdMs = nowMs;
-  const ca = x.createdAt as Timestamp | undefined;
-  if (ca && typeof ca.toDate === "function") {
-    createdMs = ca.toDate().getTime();
-  }
-
-  const ageH = Math.max(1, (nowMs - createdMs) / 3_600_000); // horas
-  const decay = 1 / Math.sqrt(ageH); // más nuevo = más peso
-  return (likes * 1 + comments * 2) * decay;
-}
-
-/** Lee últimos N días de submissions y resume señales. */
-async function collectSignals(days = 7): Promise<SignalSummary> {
-  const startTS = Timestamp.fromDate(daysAgo(days));
-  const now = Date.now();
-
-  const sumsTags = new Map<string, number>();
-  const sumsMoods = new Map<string, number>();
-  const examples: SignalExample[] = [];
-
-  const snap = await db
+async function computeTrending(dateKey: string) {
+  const qs = await db
     .collection("submissions")
-    .where("createdAt", ">=", startTS)
+    .where("dateKey", "==", dateKey)
+    .where("status", "==", "public")
+    .limit(5000)
     .get();
 
-  for (const doc of snap.docs) {
-    const x = doc.data();
-    const s = scoreOf(x, now);
-    if (s <= 0) continue;
+  const items: (Required<Pick<Subm, "uid" | "mode">> & {
+    id: string;
+    score: number;
+    likes: number;
+    views: number;
+    reposts: number;
+  })[] = [];
 
-    const tag = String(x.challengeTag || x.tag || x.challenge || "")
-      .trim()
-      .toLowerCase();
-    const mood = String(x.mood || x.category || "")
-      .trim()
-      .toLowerCase();
+  const tagC: CountMap = new Map();
+  const styC: CountMap = new Map();
+  const modeC: CountMap = new Map();
 
-    if (tag) sumsTags.set(tag, (sumsTags.get(tag) || 0) + s);
-    if (mood) sumsMoods.set(mood, (sumsMoods.get(mood) || 0) + s);
+  qs.forEach((doc) => {
+    const s = doc.data() as Subm;
+    const id = doc.id;
+    const w = weight(s);
+    const likes = s.likesCount ?? 0;
+    const views = s.viewsCount ?? 0;
+    const reposts = s.repostsCount ?? 0;
+    const uid = s.uid || "anon";
+    const mode = s.mode || "global";
 
-    examples.push({
-      caption: x.caption ? String(x.caption).slice(0, 140) : undefined,
-      tag,
-      mood,
-      sample: String(x.caption || tag || mood || "").slice(0, 80),
-    });
-  }
-
-  const topTags = [...sumsTags.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([k]) => k);
-
-  const topMoods = [...sumsMoods.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([k]) => k);
-
-  return { topTags, topMoods, examples: examples.slice(0, 12) };
-}
-
-function fallback(category: CategoryKey): string {
-  const map: Record<CategoryKey, string> = {
-    global: "Graba algo que te haga reír en menos de 10s.",
-    caritativo: "Haz una buena acción en cámara (algo simple y sincero).",
-    picaro: "Comparte un truco o life-hack que pocos conocen.",
-    creativo: "Transforma un objeto común en algo inesperado.",
-    rebelde: "Rompe una regla cotidiana de forma divertida e inofensiva.",
-    troll: "Trolea con respeto: cambia algo y graba la reacción.",
-    chill: "Muestra tu momento zen favorito de hoy.",
-  };
-  return map[category];
-}
-
-/** Escribe /challenges/{YYYYMMDD} con categorías, señales y metadatos. */
-async function writeChallengeDoc(
-  dateKeyStr: string,
-  ideas: Record<string, string>,
-  signals: SignalSummary
-): Promise<void> {
-  const payload: {
-    generatedAt: FirebaseFirestore.FieldValue;
-    basedOn: {
-      days: number;
-      windowStart: FirebaseFirestore.Timestamp;
-      windowEnd: FirebaseFirestore.FieldValue;
-    };
-    signals: SignalSummary;
-    categories: Record<CategoryKey, { instruction: string }>;
-  } = {
-    generatedAt: FieldValue.serverTimestamp(),
-    basedOn: {
-      days: 7,
-      windowStart: Timestamp.fromDate(daysAgo(7)),
-      windowEnd: FieldValue.serverTimestamp(),
-    },
-    signals,
-    categories: {} as Record<CategoryKey, { instruction: string }>,
-  };
-
-  for (const k of CATEGORIES) {
-    const text =
-      (ideas[k] ||
-        ideas[k.toUpperCase()] ||
-        ideas[k[0].toUpperCase() + k.slice(1)] ||
-        "").toString().trim();
-    payload.categories[k] = {
-      instruction: text || fallback(k),
-    };
-  }
-
-  await db.collection("challenges").doc(dateKeyStr).set(payload, { merge: true });
-}
-
-/** Orquesta: señales → IA → escribir doc del día. */
-async function composeAndWriteFor(date: Date) {
-  const key = dateKey(date);
-  const signals = await collectSignals(7);
-
-  const ideas = await generateChallengeIdeas({
-    topStyles: signals.topMoods,
-    topTags: signals.topTags,
-    wantCategories: [...CATEGORIES],
+    items.push({ id, uid, mode, score: w, likes, views, reposts });
+    (s.tags ?? []).forEach((t) => add(tagC, (t || "").toLowerCase(), w));
+    if (s.style) add(styC, (s.style || "").toLowerCase(), w);
+    if (s.mode) add(modeC, s.mode, w);
   });
 
-  await writeChallengeDoc(key, ideas, signals);
-  return { key, ideas, signals };
+  items.sort((a, b) => b.score - a.score);
+  const topItems = items.slice(0, 100);
+
+  return {
+    topItems,
+    topTags: topK(tagC, 8),
+    topStyles: topK(styC, 8),
+    bestMode: topK(modeC, 1)[0] ?? "global",
+  };
 }
 
-/* ===================== EXPORTED FUNCTIONS ===================== */
-
-/** CRON diario 06:00 America/Matamoros */
+/**
+ * Programado: (antes llamado buildTrending)
+ * Renombrado a generateDailyChallenges para coincidir con tu index.ts
+ */
 export const generateDailyChallenges = onSchedule(
-  {
-    schedule: "0 6 * * *",
-    timeZone: "America/Matamoros",
-    region: "us-central1",
-    secrets: [OPENAI_API_KEY],
-  },
+  { schedule: "every 30 minutes", timeZone: TZ, secrets: [OPENAI_SECRET] },
   async () => {
-    await composeAndWriteFor(new Date());
+    const key = todayKey();
+    const { topItems, topTags, topStyles, bestMode } = await computeTrending(key);
+
+    // Opcional: ideas para banners/promos
+    const ideas = await generateChallengeIdeas({
+      seedInstruction: null,
+      topTags,
+      topStyles,
+      wantCategories: ["global"],
+      preferCategory: bestMode,
+    });
+
+    await db.doc(`trending/daily/${key}`).set(
+      {
+        key,
+        updatedAt: Timestamp.now(),
+        topItems,
+        aggregates: { topTags, topStyles, bestMode },
+        ideas,
+      },
+      { merge: true }
+    );
   }
 );
 
-/** HTTP para probar manualmente: ?date=YYYYMMDD (opcional) */
-export const generateChallengesNow = onRequest(
-  { region: "us-central1", secrets: [OPENAI_API_KEY] },
-  async (req, res) => {
-    try {
-      const q = (req.query?.date as string) || dateKey();
-      let d = new Date();
-      if (q && /^\d{8}$/.test(q)) {
-        d = new Date(+q.slice(0, 4), +q.slice(4, 6) - 1, +q.slice(6, 8));
-      }
-      const out = await composeAndWriteFor(d);
-      res.json({ ok: true, ...out });
-    } catch (e: any) {
-      res.status(500).json({ ok: false, error: String(e?.message || e) });
-    }
+/**
+ * Callable: (antes llamado recomputeTrending)
+ * Renombrado a generateChallengesNow para coincidir con tu index.ts
+ */
+export const generateChallengesNow = onCall(
+  { secrets: [OPENAI_SECRET] },
+  async (_req) => {
+    const key = todayKey();
+    const { topItems, topTags, topStyles, bestMode } = await computeTrending(key);
+
+    const ideas = await generateChallengeIdeas({
+      seedInstruction: null,
+      topTags,
+      topStyles,
+      wantCategories: ["global"],
+      preferCategory: bestMode,
+    });
+
+    await db.doc(`trendingDaily/${key}`).set(
+      {
+        key,
+        updatedAt: Timestamp.now(),
+        topItems,
+        aggregates: { topTags, topStyles, bestMode },
+        ideas,
+      },
+      { merge: true }
+    );
+
+    return {
+      ok: true,
+      key,
+      counts: { items: topItems.length },
+      aggregates: { topTags, topStyles, bestMode },
+    };
   }
 );
