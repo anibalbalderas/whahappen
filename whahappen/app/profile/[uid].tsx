@@ -1,7 +1,7 @@
 // app/profile/[uid].tsx
 import React, { useEffect, useState, useCallback, memo } from 'react';
-import { View, Text, Dimensions, FlatList, TouchableOpacity } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { View, Text, Dimensions, FlatList, TouchableOpacity, Alert } from 'react-native';
+import { useLocalSearchParams, useRouter, useSegments } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -10,34 +10,23 @@ import { Video } from 'expo-av';
 import { auth, db } from '../../lib/firebase';
 import {
   collection, doc, onSnapshot, orderBy, query, where, getDoc, setDoc, deleteDoc,
-  serverTimestamp, getCountFromServer
+  serverTimestamp, getCountFromServer, addDoc
 } from 'firebase/firestore';
 import Avatar from '../../components/Avatar';
 import BottomNav from '../../components/BottomNav';
 import { rankPosts } from '../../lib/ranking';
+import { ensureThreadWith } from '../../lib/chat';
 
 const { width } = Dimensions.get('window');
 const GAP = 8, PADDING_H = 16;
 const TILE = Math.floor((width - PADDING_H * 2 - GAP * 2) / 3);
 
-/** 🔮 Fondo decorativo estilo login/register */
 const BackgroundDecor = memo(() => (
   <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}>
-    <LinearGradient
-      colors={['rgba(124,77,255,0.28)', 'rgba(124,77,255,0.0)']}
-      start={{ x: 0.1, y: 0.0 }} end={{ x: 0.9, y: 1 }}
-      style={{ position: 'absolute', width: 320, height: 320, borderRadius: 160, top: -80, left: -80, transform: [{ rotate: '18deg' }] }}
-    />
-    <LinearGradient
-      colors={['rgba(255,77,222,0.22)', 'rgba(255,77,222,0.0)']}
-      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-      style={{ position: 'absolute', width: 260, height: 260, borderRadius: 130, top: 220, right: -70, transform: [{ rotate: '-12deg' }] }}
-    />
-    <LinearGradient
-      colors={['rgba(0,210,255,0.18)', 'rgba(0,210,255,0.0)']}
-      start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }}
-      style={{ position: 'absolute', width: 420, height: 420, borderRadius: 210, bottom: -140, left: width * 0.15, transform: [{ rotate: '25deg' }] }}
-    />
+    <LinearGradient colors={['rgba(124,77,255,0.28)', 'rgba(124,77,255,0.0)']} start={{ x: 0.1, y: 0.0 }} end={{ x: 0.9, y: 1 }}
+      style={{ position: 'absolute', width: 320, height: 320, borderRadius: 160, top: -80, left: -80, transform: [{ rotate: '18deg' }] }} />
+    <LinearGradient colors={['rgba(255,77,222,0.22)', 'rgba(255,77,222,0.0)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+      style={{ position: 'absolute', width: 260, height: 260, borderRadius: 130, top: 220, right: -70, transform: [{ rotate: '-12deg' }] }} />
   </View>
 ));
 
@@ -47,6 +36,7 @@ type Post = { id: string; uid: string; videoURL: string; };
 export default function ProfileScreen() {
   const { uid } = useLocalSearchParams<{ uid: string }>();
   const router = useRouter();
+  const segments = useSegments();
   const insets = useSafeAreaInsets();
   const me = auth.currentUser?.uid || null;
 
@@ -54,7 +44,8 @@ export default function ProfileScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [followers, setFollowers] = useState<number>(0);
   const [following, setFollowing] = useState<number>(0);
-  const [isFollowing, setIsFollowing] = useState<boolean>(false);
+  const [iFollow, setIFollow] = useState<boolean>(false);
+  const [followsMe, setFollowsMe] = useState<boolean>(false);
 
   useEffect(() => {
     if (!uid) return;
@@ -67,7 +58,7 @@ export default function ProfileScreen() {
     const qy = query(collection(db, 'submissions'), where('uid', '==', String(uid)), orderBy('createdAt', 'desc'));
     const unsub = onSnapshot(qy, (snap) => {
       const arr = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Post[];
-      const ranked = rankPosts(arr, { me }); // ordenar grid por popularidad (además de createdAt)
+      const ranked = rankPosts(arr, { me });
       setPosts(ranked);
     });
     return () => unsub();
@@ -79,61 +70,113 @@ export default function ProfileScreen() {
       const cFollowing = await getCountFromServer(query(collection(db, 'follows'), where('follower', '==', String(uid))));
       setFollowers(cFollowers.data().count || 0);
       setFollowing(cFollowing.data().count || 0);
-    } catch { setFollowers(v => v || 0); setFollowing(v => v || 0); }
+    } catch {}
   }, [uid]);
 
   useEffect(() => { refreshCounts(); }, [refreshCounts]);
 
+  // follow mutuo
   useEffect(() => {
-    if (!me || !uid || me === uid) { setIsFollowing(false); return; }
-    getDoc(doc(db, 'follows', `${me}_${uid}`)).then(s => setIsFollowing(s.exists()));
+    (async () => {
+      if (!me || !uid || me === uid) { setIFollow(false); setFollowsMe(false); return; }
+      const a = await getDoc(doc(db, 'follows', `${me}_${uid}`));
+      const b = await getDoc(doc(db, 'follows', `${uid}_${me}`));
+      setIFollow(a.exists());
+      setFollowsMe(b.exists());
+      ('🟣 [Profile] follow state', { me, uid, iFollow: a.exists(), followsMe: b.exists() });
+    })();
   }, [me, uid]);
 
+  const isMe = me === uid;
+  const isMutual = iFollow && followsMe;
+
   const toggleFollow = async () => {
-    if (!me || !uid || me === uid) return;
-    const fid = `${me}_${uid}`; const ref = doc(db, 'follows', fid);
-    if (isFollowing) { await deleteDoc(ref); setIsFollowing(false); setFollowers(n => Math.max(0, n - 1)); }
-    else { await setDoc(ref, { follower: me, following: uid, createdAt: serverTimestamp() }); setIsFollowing(true); setFollowers(n => n + 1); }
+    if (!me || !uid || isMe) return;
+    const fid = `${me}_${uid}`;
+    const ref = doc(db, 'follows', fid);
+    if (iFollow) {
+      await deleteDoc(ref);
+      setIFollow(false);
+      setFollowers(n => Math.max(0, n - 1));
+    } else {
+      await setDoc(ref, { follower: me, following: uid, createdAt: serverTimestamp() });
+      setIFollow(true);
+      setFollowers(n => n + 1);
+      await addDoc(collection(db, 'notifications', String(uid), 'items'), {
+        type: 'follow',
+        fromUid: me,
+        text: 'comenzó a seguirte',
+        createdAt: serverTimestamp(),
+        seen: false,
+      });
+    }
   };
 
-  const back = () => { if ((router as any).canGoBack?.()) router.back(); else router.replace('/feed'); };
-  const openWatch = (sid: string) => router.push(`/watch/${uid}?sid=${sid}`);
+  const openMessage = async () => {
+    ('🟣 [Profile] openMessage pressed', { me, uid, isMe, isMutual, segments });
+    if (!me || !uid || isMe) { Alert.alert('No puedes enviarte mensajes a ti mismo'); return; }
+    if (!isMutual) { Alert.alert('Sigue y que te siga para poder chatear'); return; }
 
-  const Header = memo(() => {
-    const handle = user?.handle ? `@${user.handle}` : `@user-${String(uid).slice(0, 5)}`;
-    const name = user?.displayName || '';
-    const isMe = me === uid;
+    const id = await ensureThreadWith(String(uid));
+    if (!id) { Alert.alert('No se pudo crear el chat'); return; }
 
-    return (
-      <View style={{ paddingHorizontal: PADDING_H, marginTop: (insets.top || 12) + 42, marginBottom: 14 }}>
-        <BlurView intensity={40} tint="dark" style={{ borderRadius: 22, overflow: 'hidden' }}>
-          <View style={{ borderRadius: 22, borderWidth: 1, borderColor: '#1f2126', padding: 18, alignItems: 'center', backgroundColor: '#0e1015aa' }}>
-            <Avatar uid={String(uid)} size={100} />
-            <Text style={{ color: 'white', fontWeight: '900', fontSize: 22, marginTop: 12 }}>{handle}</Text>
-            {!!name && <Text style={{ color: '#c6cbd2', marginTop: 4 }} numberOfLines={1}>{name}</Text>}
+    try {
+      // navegación robusta
+      router.push({ pathname: '/chat/[threadId]', params: { threadId: id } });
+      // fallback por si tuvieras grupos de rutas
+      setTimeout(() => {
+        router.push(`/chat/${id}`);
+      }, 30);
+    } catch (e) {
+      console.error('🔴 [Profile] router.push error', e);
+      Alert.alert('Error al abrir chat', String(e));
+    }
+  };
 
-            <View style={{ flexDirection: 'row', gap: 24, marginTop: 12 }}>
-              <View style={{ alignItems: 'center' }}><Text style={{ color: 'white', fontWeight: '900' }}>{followers}</Text><Text style={{ color: '#9aa0a6' }}>seguidores</Text></View>
-              <View style={{ alignItems: 'center' }}><Text style={{ color: 'white', fontWeight: '900' }}>{following}</Text><Text style={{ color: '#9aa0a6' }}>siguiendo</Text></View>
-            </View>
+  const handle = user?.handle ? `@${user.handle}` : `@user-${String(uid).slice(0, 5)}`;
+  const name = user?.displayName || '';
 
-            {!!user?.bio && <Text style={{ color: '#e3e5e8', textAlign: 'center', marginTop: 10 }} numberOfLines={3}>{user.bio}</Text>}
+  const Header = memo(() => (
+    <View style={{ paddingHorizontal: PADDING_H, marginTop: (insets.top || 12) + 42, marginBottom: 14 }}>
+      <BlurView intensity={40} tint="dark" style={{ borderRadius: 22, overflow: 'hidden' }}>
+        <View style={{ borderRadius: 22, borderWidth: 1, borderColor: '#1f2126', padding: 18, alignItems: 'center', backgroundColor: '#0e1015aa' }}>
+          <Avatar uid={String(uid)} size={100} />
+          <Text style={{ color: 'white', fontWeight: '900', fontSize: 22, marginTop: 12 }}>{handle}</Text>
+          {!!name && <Text style={{ color: '#c6cbd2', marginTop: 4 }} numberOfLines={1}>{name}</Text>}
 
-            <TouchableOpacity onPress={isMe ? () => router.push('/profile/edit') : toggleFollow} activeOpacity={0.9} style={{ alignSelf: 'stretch', marginTop: 14 }}>
+          <View style={{ flexDirection: 'row', gap: 24, marginTop: 12 }}>
+            <View style={{ alignItems: 'center' }}><Text style={{ color: 'white', fontWeight: '900' }}>{followers}</Text><Text style={{ color: '#9aa0a6' }}>seguidores</Text></View>
+            <View style={{ alignItems: 'center' }}><Text style={{ color: 'white', fontWeight: '900' }}>{following}</Text><Text style={{ color: '#9aa0a6' }}>siguiendo</Text></View>
+          </View>
+
+          <View style={{ flexDirection: 'row', gap: 10, alignSelf: 'stretch', marginTop: 14 }}>
+            <TouchableOpacity onPress={isMe ? () => router.push('/profile/edit') : toggleFollow} activeOpacity={0.9} style={{ flex: 1 }}>
               <View style={{ backgroundColor: 'white', paddingVertical: 12, borderRadius: 12, alignItems: 'center' }}>
-                <Text style={{ color: 'black', fontWeight: '900' }}>{isMe ? 'Editar perfil' : isFollowing ? 'Siguiendo' : 'Seguir'}</Text>
+                <Text style={{ color: 'black', fontWeight: '900' }}>{isMe ? 'Editar perfil' : iFollow ? 'Siguiendo' : 'Seguir'}</Text>
               </View>
             </TouchableOpacity>
+
+            {!isMe && isMutual && (
+              <TouchableOpacity onPress={openMessage} activeOpacity={0.9} style={{ width: 56 }}>
+                <View style={{ backgroundColor: '#1d2330', borderWidth: 1, borderColor: '#2a3242', paddingVertical: 9, borderRadius: 12, alignItems: 'center' }}>
+                  <Ionicons name="chatbubble-ellipses-outline" size={20} color="#fff" />
+                </View>
+              </TouchableOpacity>
+            )}
           </View>
-        </BlurView>
-      </View>
-    );
-  });
+
+          {!isMe && !isMutual && followsMe && (
+            <Text style={{ color: '#9aa0a6', marginTop: 8 }}>Te sigue. Síguelo para poder enviar mensajes.</Text>
+          )}
+        </View>
+      </BlurView>
+    </View>
+  ));
 
   const GridItem = memo(({ item }: { item: Post }) => (
     <TouchableOpacity
       activeOpacity={0.9}
-      onPress={() => openWatch(item.id)}
+      onPress={() => router.push(`/watch/${uid}?sid=${item.id}`)}
       style={{
         width: TILE, height: TILE * 1.4, borderRadius: 10, overflow: 'hidden',
         backgroundColor: '#0f1116', borderWidth: 1, borderColor: '#1f232c'
@@ -144,15 +187,7 @@ export default function ProfileScreen() {
 
   return (
     <LinearGradient colors={['#0b0b0d', '#000']} style={{ flex: 1 }}>
-      {/* Decor de fondo */}
       <BackgroundDecor />
-
-      {/* Back arriba, fuera de la card */}
-      <View style={{ position: 'absolute', top: (insets.top || 12) + 8, left: 12, zIndex: 10 }}>
-        <TouchableOpacity onPress={back} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Ionicons name="chevron-back" size={28} color="#fff" />
-        </TouchableOpacity>
-      </View>
 
       <FlatList
         data={posts}
@@ -170,7 +205,6 @@ export default function ProfileScreen() {
         windowSize={7}
       />
 
-      {/* Menú inferior */}
       <BottomNav />
     </LinearGradient>
   );
