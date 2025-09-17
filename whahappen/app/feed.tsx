@@ -1,9 +1,11 @@
 // app/feed.tsx
+import { getApp } from 'firebase/app'
+import { getFunctions, httpsCallable } from 'firebase/functions'
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, useWindowDimensions, FlatList, TouchableOpacity, TextInput,
   KeyboardAvoidingView, Platform, TouchableWithoutFeedback, Animated,
-  Keyboard, StyleSheet, Modal, StatusBar
+  Keyboard, StyleSheet, Modal, StatusBar, Share
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -13,7 +15,7 @@ import { useRouter } from 'expo-router';
 
 import { auth, db } from '../lib/firebase';
 import {
-  addDoc, collection, deleteDoc, doc, getDoc, increment, limit, onSnapshot,
+  addDoc, collection, deleteField, doc, getDoc, increment, limit, onSnapshot,
   orderBy, query, runTransaction, serverTimestamp, updateDoc, getCountFromServer
 } from 'firebase/firestore';
 
@@ -248,7 +250,7 @@ export default function Feed() {
       const { choice } = await getTodayChoice();
       // si no hay elección/lock de hoy, o si no hay submission del día, redirige:
       if (!choice /* o tu condición de “no ha completado el reto” */) {
-        r.replace('/');
+        router.replace('/');
       }
     })();
   }, []);
@@ -316,11 +318,11 @@ export default function Feed() {
         const iFollow = !!meSnap.data()?.following?.[uid];
 
         tx.update(meRef, {
-          [`following.${uid}`]: iFollow ? deleteDoc : true,
+          [`following.${uid}`]: iFollow ? deleteField : true,
           followingCount: increment(iFollow ? -1 : 1),
         } as any);
         tx.update(otherRef, {
-          [`followers.${me}`]: iFollow ? deleteDoc : true,
+          [`followers.${me}`]: iFollow ? deleteField : true,
           followersCount: increment(iFollow ? -1 : 1),
         } as any);
       });
@@ -377,6 +379,35 @@ export default function Feed() {
     ]).start();
   };
 
+  async function shareOutside(submissionId: string) {
+    try {
+      const fx = getFunctions(getApp(), "us-central1"); // 👈 misma región que deploy
+      const createShortLink = httpsCallable(fx, "createShortLink"); // 👈 nombre exacto
+      const { data }: any = await createShortLink({ submissionId });
+      const link = data?.shortLink || "";
+      await Share.share({ message: `Mira mi chain 👉 ${link}`, url: link });
+    } catch (e) {
+      console.log("shareOutside error", e);
+    }
+  }
+
+  const [squad, setSquad] = useState<any | null>(null);
+
+  // al montar:
+  useEffect(() => {
+    const my = auth.currentUser?.uid;
+    if (!my) return;
+    const uRef = doc(db, "users", my);
+    const unsub = onSnapshot(uRef, async (uSnap) => {
+      const squadId = uSnap.data()?.squadId;
+      if (!squadId) { setSquad(null); return; }
+      const sRef = doc(db, "squads", squadId);
+      onSnapshot(sRef, (s) => setSquad({ id: squadId, ...s.data() }));
+      // opcional: leer squadDays de ayer para mostrar “4/5 publicaron ayer”
+    });
+    return unsub;
+  }, []);
+
   // Render de cada post
   const renderItem = ({ item, index }: { item: Post; index: number }) => {
     const playing = openCommentsFor ? false : (pausedId ? pausedId !== item.id : index === active);
@@ -393,7 +424,7 @@ export default function Feed() {
       (handleTap as any)._last = now; setPausedId(p => p ? null : item.id);
     };
 
-    const CAPTION_BOTTOM = (insets.bottom || 12) + 100;
+    const CAPTION_BOTTOM = (insets.bottom || 12) + 90;
 
     return (
       <View style={{ width: W, height: (rowH || H), backgroundColor: 'black' }}>
@@ -423,7 +454,6 @@ export default function Feed() {
         <View style={{ position:'absolute', left:14, bottom: CAPTION_BOTTOM, right:110 }}>
           <View style={{ flexDirection:'row', alignItems:'center', gap:8, marginBottom:8 }}>
             <TouchableOpacity onPress={() => router.push(`/profile/${item.uid}`)} activeOpacity={0.9} style={{ flexDirection:'row', alignItems:'center', gap:8 }}>
-              <Avatar uid={item.uid} size={36} />
               <Text style={{ color:'white', fontWeight:'800', fontSize:16 }}>{usernameFor(item.uid, authors)}</Text>
             </TouchableOpacity>
             {!!tag && <View style={{ paddingHorizontal:10, paddingVertical:4, borderRadius:999, backgroundColor:'#ffffff22' }}>
@@ -433,7 +463,7 @@ export default function Feed() {
           {!!item.caption && <Text style={{ color:'white' }} numberOfLines={2}>{item.caption}</Text>}
         </View>
 
-        <View style={{ position:'absolute', right:10, top: (rowH || H) * 0.54, alignItems:'center' }}>
+        <View style={{ position:'absolute', right:10, top: (rowH || H) * 0.45, alignItems:'center' }}>
           <View style={{ alignItems:'center', marginBottom:16 }}>
             <TouchableOpacity onPress={() => router.push(`/profile/${item.uid}`)} activeOpacity={0.9} style={{ position:'relative' }}>
               <Avatar uid={item.uid} size={42} />
@@ -462,6 +492,16 @@ export default function Feed() {
             <Ionicons name="eye" size={26} color="#fff" />
             <Text style={{ color:'white', marginTop:6, fontWeight:'700' }}>{viewsN}</Text>
           </View>
+
+          {/* Botón Compartir fuera — DEBAJO del ojo */}
+          <TouchableOpacity
+            onPress={() => shareOutside(item.id)}
+            style={{ alignItems: "center", marginBottom: 12, marginTop:18 }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="share-social-outline" size={26} color="#fff" />
+            <Text style={{ color: "#fff", fontWeight: "800", marginTop: 4, fontSize: 12 }}>Compartir</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -470,6 +510,43 @@ export default function Feed() {
   return (
     <View style={{ flex:1, backgroundColor:'black' }} onLayout={(e) => setRowH(e.nativeEvent.layout.height)}>
       <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+
+      {/* Banner de racha del Squad */}
+      {Boolean(squad?.streak) && (
+        <TouchableOpacity
+          onPress={() => router("/squad")}
+          activeOpacity={0.9}
+          style={{
+            marginHorizontal: 12,
+            marginTop: 8,
+            marginBottom: 6,
+            backgroundColor: "#101318",
+            borderWidth: 1,
+            borderColor: "#252a36",
+            borderRadius: 14,
+            paddingVertical: 10,
+            paddingHorizontal: 12,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <Text style={{ fontSize: 18 }}>🔥</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: "#fff", fontWeight: "900" }}>
+              Racha del Squad: {squad.streak} día{Number(squad.streak) === 1 ? "" : "s"}
+            </Text>
+            {!!squad.name && (
+              <Text style={{ color: "#9aa0a6", marginTop: 2 }}>
+                {squad.name}
+                {/* Si calculas progreso de ayer, descomenta:  — {yesterdayPosters}/{membersCount} publicaron */}
+              </Text>
+            )}
+          </View>
+          <Ionicons name="chevron-forward" size={18} color="#9aa0a6" />
+        </TouchableOpacity>
+      )}
+
       <FlatList
         data={items}
         key={`feed-${rowH || 'auto'}`}

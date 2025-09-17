@@ -30,6 +30,7 @@ export default memo(function BottomNav({}: Props) {
   const isProfile = pathname?.startsWith("/profile") && !pathname?.includes("/edit");
   const isNotif = pathname?.startsWith("/notifications");
   const isTop = pathname?.startsWith("/top-creators");
+  const isSquad = pathname?.startsWith("/squad");
 
   const Item = ({
     icon,
@@ -87,6 +88,13 @@ export default memo(function BottomNav({}: Props) {
             shadow,
           ]}
         >
+          <Item
+            icon={isSquad ? "flame" : "flame-outline"}  // también puedes usar "people"/"people-outline"
+            label="Squad"
+            active={isSquad}
+            onPress={() => go("/squad")}
+          />
+
           <Item
             icon={isTop ? "trophy" : "trophy-outline"}
             label="Top"
