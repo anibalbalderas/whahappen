@@ -83,7 +83,7 @@ export default function SignUp() {
       } else {
         await createUserWithEmailAndPassword(auth, email.trim(), pwd);
         await ensureProfileDoc();
-        r.replace('/feed');
+        r.replace('/');
       }
       r.replace('/');
         } catch (e: any) {

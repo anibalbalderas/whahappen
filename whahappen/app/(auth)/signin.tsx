@@ -68,7 +68,7 @@ export default function SignIn() {
       setLoading(true);
       await signInWithEmailAndPassword(auth, email.trim(), pwd);
       await ensureProfileDoc();
-      r.replace('/feed');
+      r.replace('/');
     } catch (e: any) {
       Alert.alert('No se pudo iniciar sesión', e?.message ?? 'Revisa tus datos');
     } finally { setLoading(false); }

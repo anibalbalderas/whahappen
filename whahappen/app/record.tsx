@@ -1,5 +1,5 @@
 // app/record.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StatusBar, Animated, Easing, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
@@ -7,34 +7,33 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
+import { Svg, Circle } from 'react-native-svg';
 
 import { setRecordedUri, getSelectedMode } from '../lib/session';
 import { ensureAnonAuth, db } from '../lib/firebase';
 import { getTodayChoice, lockTodayChoice, millisLeft, formatCountdown } from '../lib/choices';
-import {
-  doc, getDoc, collection, getDocs, limit, orderBy, documentId, query
-} from 'firebase/firestore';
+import { doc, getDoc, collection, getDocs, limit, orderBy, documentId, query } from 'firebase/firestore';
 
 const MAX_SECONDS = 20;
+const MIN_SECONDS = 5;
 
-// === Helpers + fetchInstructionFor (reemplaza este bloque en app/record.tsx) ===
-
+// === Helpers + fetchInstructionFor (con compat de "global" fuera de categories) ===
 const clean = (s?: any) =>
   String(s ?? '')
-    .replace(/^[`'"]+|[`'"]+$/g, '')  // quita backticks/comillas al inicio/fin
-    .replace(/^"+|"+$/g, '')          // comillas dobles extra
-    .replace(/^'+|'+$/g, '')          // comillas simples extra
+    .replace(/^[`'"]+|[`'"]+$/g, '')
+    .replace(/^"+|"+$/g, '')
+    .replace(/^'+|'+$/g, '')
     .replace(/''/g, "'")
     .trim();
 
 const normalize = (s?: string) =>
   (s ?? '')
     .toLowerCase()
-    .replace(/^#/, '')                // "#caritativo" -> "caritativo"
-    .replace(/^reto\s+/, '')          // "reto caritativo" -> "caritativo"
-    .replace(/\s+/g, ' ')             // colapsa espacios
+    .replace(/^#/, '')
+    .replace(/^reto\s+/, '')
+    .replace(/\s+/g, ' ')
     .trim()
-    .normalize('NFD')                 // elimina acentos: "pícaro" -> "picaro"
+    .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 
 const todayKey = () => {
@@ -45,9 +44,9 @@ const todayKey = () => {
   return `${yyyy}${mm}${dd}`;
 };
 
-/** Lee instruction desde /challenges/{YYYYMMDD}.categories[mode].instruction
- *  Si el doc de hoy no existe, usa el más reciente por id desc.
- *  Hace fuzzy-match de la categoría (normaliza nombres/acentos/“reto ”/#). */
+/** Lee instruction desde /challenges/{YYYYMMDD}.categories[mode].instruction.
+ *  Si no existe el doc de hoy, usa el más reciente por id desc.
+ *  También soporta `global` al nivel raíz (fuera de categories). */
 async function fetchInstructionFor(modeRaw: string): Promise<{ title: string; instruction: string }> {
   const wanted = normalize(modeRaw) || 'global';
 
@@ -57,7 +56,7 @@ async function fetchInstructionFor(modeRaw: string): Promise<{ title: string; in
     const snap = await getDoc(doc(db, 'challenges', todayKey()));
     if (snap.exists()) data = snap.data();
   } catch (e) {
-    console.log('🔴 getDoc(today) error', e);
+    console.log('[Record] getDoc(today) error', e);
   }
 
   // 2) Último doc si hoy no existe
@@ -66,34 +65,32 @@ async function fetchInstructionFor(modeRaw: string): Promise<{ title: string; in
       const qs = await getDocs(query(collection(db, 'challenges'), orderBy(documentId(), 'desc'), limit(1)));
       if (!qs.empty) data = qs.docs[0].data();
     } catch (e) {
-      console.log('🔴 latest challenges doc error', e);
+      console.log('[Record] latest challenges doc error', e);
     }
   }
 
-  // 3) categorías
-  const cats = data?.categories && typeof data.categories === 'object' ? data.categories : null;
+  // 3) categorías + compat con "global" a nivel raíz
+  const catsRaw = data?.categories && typeof data.categories === 'object' ? data.categories : {};
+  const merged: any = { ...catsRaw };
+  if (data && (typeof data.global === 'string' || typeof data.global === 'object')) {
+    merged.global = data.global;
+  }
+  const cats = Object.keys(merged).length ? merged : null;
+
   if (!cats) {
     return { title: `Reto ${wanted}`, instruction: 'Completa el reto de esta categoría y compártelo en video.' };
   }
 
-  // 4) mapa normalizado -> clave original
-  const keys = Object.keys(cats);                // ej: ["caritativo","chill","creativo","picaro","rebelde","troll","global"]
+  const keys = Object.keys(cats);
   const normToOrig: Record<string, string> = {};
   for (const k of keys) normToOrig[normalize(k)] = k;
 
-  // 5) elige clave: exacta, "global", o primera disponible
   let pickKey = normToOrig[wanted] ?? normToOrig['global'] ?? keys[0];
 
-  // 6) obtiene instruction (soporta {instruction}, {instruccion}, {text} o string directo)
   const entry = cats[pickKey];
-  const raw =
-    typeof entry === 'string'
-      ? entry
-      : entry?.instruction ?? entry?.instruccion ?? entry?.text;
-
+  const raw = typeof entry === 'string' ? entry : entry?.instruction ?? entry?.instruccion ?? entry?.text;
   let instruction = clean(raw);
 
-  // 7) si aún no hay texto, busca la primera categoría con instrucción válida
   if (!instruction) {
     for (const k of keys) {
       const e = cats[k];
@@ -103,12 +100,85 @@ async function fetchInstructionFor(modeRaw: string): Promise<{ title: string; in
   }
 
   const title = `Reto ${pickKey}`;
-  return {
-    title,
-    instruction: instruction || 'Completa el reto de esta categoría y compártelo en video.'
-  };
+  return { title, instruction: instruction || 'Completa el reto de esta categoría y compártelo en video.' };
 }
-// === Fin del bloque ===
+// === Fin helpers ===
+
+// ===== Anillo de progreso tipo TikTok (SVG + Animated) =====
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+function RecordRing({
+  progress,           // 0..1
+  size = 96,
+  stroke = 6,
+  trackColor = '#ffffff44',
+  progressColor = '#ff2d55',
+  minMarkFraction = MIN_SECONDS / MAX_SECONDS, // puntito del mínimo
+}: {
+  progress: Animated.Value;
+  size?: number;
+  stroke?: number;
+  trackColor?: string;
+  progressColor?: string;
+  minMarkFraction?: number;
+}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+
+  const offset = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [c, 0],
+  });
+
+  const minAngleDeg = Math.max(0, Math.min(1, minMarkFraction)) * 360;
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: 'absolute' }}>
+        {/* pista */}
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          stroke={trackColor}
+          strokeWidth={stroke}
+          fill="transparent"
+        />
+        {/* progreso */}
+        <AnimatedCircle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          stroke={progressColor}
+          strokeWidth={stroke}
+          strokeDasharray={`${c} ${c}`}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          fill="transparent"
+        />
+      </Svg>
+
+      {/* puntito del mínimo */}
+      <View
+        style={{
+          position: 'absolute',
+          width: size,
+          height: size,
+          alignItems: 'center',
+          justifyContent: 'center',
+          transform: [{ rotate: `${minAngleDeg}deg` }],
+        }}
+        pointerEvents="none"
+      >
+        <View
+          style={{
+            width: 8, height: 8, borderRadius: 4, backgroundColor: '#ffffff99',
+            transform: [{ translateY: -((size - stroke) / 2) }],
+          }}
+        />
+      </View>
+    </View>
+  );
+}
 
 export default function Record() {
   const r = useRouter();
@@ -147,36 +217,24 @@ export default function Record() {
 
   // grabación
   const [recording, setRecording] = useState(false);
-  const progress = useRef(new Animated.Value(0)).current;
+  const progress = useRef(new Animated.Value(0)).current; // 0..1
   const timerRef = useRef<any>(null);
   const [elapsed, setElapsed] = useState(0);
+  const wantStopRef = useRef(false); // para "presiona y mantén" + mínimo
 
   // lock del día
   const [timeLeft, setTimeLeft] = useState<number>(0);
-
-  // anillo
-  const SIZE = 96, STROKE = 6, HALF = SIZE / 2;
-  const rightRot = progress.interpolate({ inputRange: [0, 0.5, 1], outputRange: ['0deg', '180deg', '180deg'] });
-  const leftRot = progress.interpolate({ inputRange: [0, 0.5, 1], outputRange: ['0deg', '0deg', '180deg'] });
-  const Half = ({ side, rotation }: { side: 'left' | 'right'; rotation: any }) => (
-    <View style={{ position: 'absolute', width: HALF, height: SIZE, overflow: 'hidden', left: side === 'left' ? 0 : HALF, top: 0 }}>
-      <Animated.View style={{
-        position: 'absolute', left: side === 'left' ? 0 : -HALF, width: SIZE, height: SIZE,
-        borderRadius: SIZE / 2, borderWidth: STROKE, borderColor: '#fff', transform: [{ rotateZ: rotation }]
-      }}/>
-    </View>
-  );
 
   // montaje
   useEffect(() => {
     (async () => {
       await ensureAnonAuth();
       if (!cameraPerm?.granted) await requestCameraPerm();
-      if (!micPerm?.granted) await requestMicPerm();
+      if (!micPerm?.granted)    await requestMicPerm();
 
       const mode = normalize(getSelectedMode());
 
-      // === Cargar reto con tolerancia a errores y SIEMPRE abrir popup ===
+      // Cargar reto y abrir popup
       let t = `Reto ${mode || 'global'}`;
       let inst = '';
       try {
@@ -184,16 +242,12 @@ export default function Record() {
         if (res?.title) t = res.title;
         if (res?.instruction) inst = res.instruction;
       } catch (e) {
-        console.log('🔴 [Record] fetchInstructionFor error', e);
+        console.log('[Record] fetchInstructionFor error', e);
       }
-      if (!inst) {
-        // fallback si no hubo instrucción
-        inst = 'Completa el reto de esta categoría y compártelo en video.';
-      }
+      if (!inst) inst = 'Completa el reto de esta categoría y compártelo en video.';
       setTitle(t);
       setInstruction(inst);
       openPopup();
-      // ================================================================
 
       // lock del día
       try {
@@ -211,7 +265,7 @@ export default function Record() {
           setTimeLeft(left);
         }
       } catch (e) {
-        console.log('🔴 [Record] lock choice error', e);
+        console.log('[Record] lock choice error', e);
       }
     })();
 
@@ -229,8 +283,10 @@ export default function Record() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Si se agota el tiempo del bloqueo mientras graba
   useEffect(() => {
     if (recording && timeLeft <= 0) {
+      wantStopRef.current = true;
       camRef.current?.stopRecording();
       if (timerRef.current) clearInterval(timerRef.current);
       setRecording(false);
@@ -239,33 +295,72 @@ export default function Record() {
     }
   }, [timeLeft, recording, r]);
 
-  const start = async () => {
+  // Si el usuario soltó antes del mínimo, detenemos justo al llegar a MIN_SECONDS
+  useEffect(() => {
+    if (recording && wantStopRef.current && elapsed >= MIN_SECONDS) {
+      camRef.current?.stopRecording();
+    }
+  }, [elapsed, recording]);
+
+  const startProgressAnim = useCallback(() => {
+    progress.stopAnimation();
+    progress.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: MAX_SECONDS * 1000,
+      easing: Easing.linear,
+      useNativeDriver: false, // strokeDashoffset no soporta native driver
+    }).start();
+  }, [progress]);
+
+  const start = useCallback(async () => {
     if (timeLeft <= 0) { Alert.alert('Tiempo agotado', 'Se acabó el tiempo para completar el reto de hoy.'); return; }
-    if (!camRef.current) return;
+    if (!camRef.current || recording) return;
 
     if (popupVisible) closePopup();
 
-    progress.setValue(0);
+    wantStopRef.current = false;
     setElapsed(0);
     setRecording(true);
-
-    Animated.timing(progress, { toValue: 1, duration: MAX_SECONDS * 1000, easing: Easing.linear, useNativeDriver: false }).start();
+    startProgressAnim();
 
     const t0 = Date.now();
-    timerRef.current = setInterval(() => setElapsed(Math.min(MAX_SECONDS, Math.floor((Date.now() - t0) / 1000))), 250);
+    timerRef.current && clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      const s = Math.min(MAX_SECONDS, Math.floor((Date.now() - t0) / 1000));
+      setElapsed(s);
+    }, 150);
 
-    const res = await camRef.current.recordAsync({ maxDuration: MAX_SECONDS });
-    if (timerRef.current) clearInterval(timerRef.current);
-    setRecording(false);
+    try {
+      // Espera hasta stopRecording o maxDuration
+      const res = await camRef.current.recordAsync({ maxDuration: MAX_SECONDS, videoStabilizationMode: 'standard' as any });
+      if (timerRef.current) clearInterval(timerRef.current);
+      setRecording(false);
 
-    setRecordedUri(res?.uri ?? null);
-    r.push('/review-upload');
-  };
+      // Guarda y navega a review
+      setRecordedUri(res?.uri ?? null);
+      if (!res?.uri) {
+        Alert.alert('Grabación', 'No se generó un video válido.');
+        // reset visual del anillo
+        progress.stopAnimation(); progress.setValue(0);
+        return;
+      }
+      // reset visual del anillo
+      progress.stopAnimation(); progress.setValue(0);
+      r.push('/review-upload');
+    } catch (e) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      setRecording(false);
+      progress.stopAnimation(); progress.setValue(0);
+    }
+  }, [timeLeft, popupVisible, recording, r, progress, startProgressAnim]);
 
-  const stop = () => {
+  const stop = useCallback(() => {
+    if (!recording) return;
+    // Si aún no cumplimos mínimo, marca intención de parar (se detendrá al llegar a MIN_SECONDS)
+    if (elapsed < MIN_SECONDS) { wantStopRef.current = true; return; }
     camRef.current?.stopRecording();
-    if (timerRef.current) clearInterval(timerRef.current);
-  };
+  }, [recording, elapsed]);
 
   if (!cameraPerm?.granted) return <Text style={{ padding: 24, color: 'white' }}>Necesitamos permiso de cámara…</Text>;
   if (!micPerm?.granted)    return <Text style={{ padding: 24, color: 'white' }}>Necesitamos permiso de micrófono…</Text>;
@@ -281,20 +376,24 @@ export default function Record() {
 
       {/* Back */}
       <View style={{ position: 'absolute', top: (insets.top || 12) + 15, left: 12, zIndex: 20 }}>
-        <TouchableOpacity onPress={() => { if ((r as any).canGoBack?.()) r.back(); else r.replace('/feed'); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <TouchableOpacity
+          onPress={() => { if (recording) return; if ((r as any).canGoBack?.()) r.back(); else r.replace('/feed'); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
           <Ionicons name="chevron-back" size={28} color="#fff" />
         </TouchableOpacity>
       </View>
 
       {/* Flip camera */}
       <TouchableOpacity
-        onPress={() => setFacing(facing === 'back' ? 'front' : 'back')}
+        onPress={() => { if (!recording) setFacing(facing === 'back' ? 'front' : 'back'); }}
         style={{
           position: 'absolute', top: TOP, right: 12,
           width: HUD_H, height: HUD_H, borderRadius: HUD_H / 2,
           backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center'
         }}
         activeOpacity={0.9}
+        disabled={recording}
       >
         <Ionicons name="camera-reverse-outline" size={22} color="#fff" />
       </TouchableOpacity>
@@ -335,7 +434,7 @@ export default function Record() {
         </Animated.View>
       )}
 
-      {/* countdown */}
+      {/* countdown bloqueo (tiempo restante del reto) */}
       {timeLeft > 0 && (
         <View style={{ position: 'absolute', top: 76, left: 0, right: 0, alignItems: 'center' }}>
           <View style={{ backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999 }}>
@@ -344,27 +443,19 @@ export default function Record() {
         </View>
       )}
 
-      {/* controles de grabación */}
-      <View style={{ position: 'absolute', bottom: (insets.bottom || 12) + 28, width: '100%', alignItems: 'center', gap: 10 }}>
-        {!recording ? (
-          <TouchableOpacity onPress={start} activeOpacity={0.9}>
-            <View style={{ width: SIZE, height: SIZE, alignItems: 'center', justifyContent: 'center' }}>
-              <View style={{ width: SIZE - 18, height: SIZE - 18, borderRadius: 999, backgroundColor: 'red', borderWidth: 6, borderColor: 'white' }} />
-            </View>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity onPress={stop} activeOpacity={0.9}>
-            <View style={{ width: SIZE, height: SIZE, alignItems: 'center', justifyContent: 'center' }}>
-              <View style={{ position: 'absolute', width: SIZE, height: SIZE, borderRadius: SIZE / 2, borderWidth: STROKE, borderColor: '#ffffff44' }} />
-              <Half side="left" rotation={leftRot} />
-              <Half side="right" rotation={rightRot} />
+      {/* controles de grabación - PRESIONA Y MANTÉN con anillo TikTok */}
+      <View style={{ position: 'absolute', bottom: BOTTOM, width: '100%', alignItems: 'center' }}>
+        <TouchableOpacity onPressIn={start} onPressOut={stop} activeOpacity={0.9}>
+          <View style={{ width: 96, height: 96, alignItems: 'center', justifyContent: 'center' }}>
+            <RecordRing progress={progress} size={96} stroke={6} />
+            {/* centro: círculo (idle) / cuadrado (grabando) */}
+            {recording ? (
               <View style={{ position: 'absolute', width: 34, height: 34, borderRadius: 8, backgroundColor: 'white' }} />
-            </View>
-          </TouchableOpacity>
-        )}
-        <Text style={{ color: 'white', opacity: 0.9 }}>
-          {recording ? `Grabando… ${elapsed}s / ${MAX_SECONDS}s` : 'Toca para grabar'}
-        </Text>
+            ) : (
+              <View style={{ position: 'absolute', width: 72, height: 72, borderRadius: 36, backgroundColor: 'white' }} />
+            )}
+          </View>
+        </TouchableOpacity>
       </View>
     </View>
   );
