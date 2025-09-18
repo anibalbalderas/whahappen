@@ -1,7 +1,7 @@
 // app/notifications.tsx  (archivo entero por comodidad)
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { View, Text, FlatList, TouchableOpacity, StatusBar } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import BottomNav from '../components/BottomNav';
 import { useRouter } from 'expo-router';
@@ -107,101 +107,104 @@ export default function Notifications() {
   };
 
   return (
-    <View style={{ flex:1, backgroundColor:'#000' }}>
-      <BackgroundDecor />
+    <SafeAreaView style={{ flex:1, backgroundColor:'#000' }} edges={['top','bottom']}>
+      <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+      <View style={{ flex:1, backgroundColor:'#000' }}>
+        <BackgroundDecor />
 
-      <View style={{ paddingTop:(insets.top||12)+8, paddingHorizontal:16, paddingBottom:12 }}>
-        <Text style={{ color:'#fff', fontWeight:'900', fontSize:22 }}>Buzón</Text>
-        <Text style={{ color:'#9aa0a6', marginTop:6 }}>Amigos, mensajes y notificaciones.</Text>
-      </View>
+        <View style={{ paddingTop:(insets.top||12)+8, paddingHorizontal:16, paddingBottom:12 }}>
+          <Text style={{ color:'#fff', fontWeight:'900', fontSize:22 }}>Buzón</Text>
+          <Text style={{ color:'#9aa0a6', marginTop:6 }}>Amigos, mensajes y notificaciones.</Text>
+        </View>
 
-      {/* Amigos */}
-      <View style={{ paddingHorizontal:16, paddingBottom:8 }}>
-        <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Amigos</Text>
-        <FlatList
-          horizontal
-          data={friends}
-          keyExtractor={(u)=>u}
-          showsHorizontalScrollIndicator={false}
-          ItemSeparatorComponent={() => <View style={{ width:10 }} />}
-          renderItem={({item: uid})=>(
-            <TouchableOpacity
-              onPress={()=>openChatWith(uid)}
-              style={{ padding:10, borderRadius:12, backgroundColor:'#13161c', borderWidth:1, borderColor:'#232838' }}>
-              <View style={{ flexDirection:'row', alignItems:'center', gap:8 }}>
-                <Avatar uid={uid} size={28} />
-                <Text style={{ color:'#fff', fontWeight:'700' }}>{nameFor(uid)}</Text>
-              </View>
-              <Text style={{ color:'#9aa0a6', fontSize:12, marginTop:2 }}>Mensaje</Text>
-            </TouchableOpacity>
-          )}
-        />
-      </View>
-
-      {/* Mensajes (threads con preview "Tú:" si el último es tuyo) */}
-      <View style={{ paddingHorizontal:16, paddingVertical:8 }}>
-        <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Mensajes</Text>
-        {threads.map(t=>{
-          const [a,b] = String(t.id).split('_');
-          const other = a===me ? b : a;
-          const preview =
-            t.lastText
-              ? (t.lastFromUid === me ? `Tú: ${t.lastText}` : t.lastText)
-              : 'Nuevo chat';
-          return (
-            <TouchableOpacity key={t.id}
-              onPress={()=>router.push({ pathname:'/chat/[threadId]', params:{ threadId: t.id } })}
-              style={{ paddingVertical:12, borderBottomColor:'#1f2230', borderBottomWidth:1 }}>
-              <View style={{ flexDirection:'row', alignItems:'center', gap:10 }}>
-                <Avatar uid={other} size={34} />
-                <View style={{ flex:1 }}>
-                  <Text style={{ color:'#fff', fontWeight:'700' }}>{nameFor(other)}</Text>
-                  <Text style={{ color:'#9aa0a6' }} numberOfLines={1}>{preview}</Text>
+        {/* Amigos */}
+        <View style={{ paddingHorizontal:16, paddingBottom:8 }}>
+          <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Amigos</Text>
+          <FlatList
+            horizontal
+            data={friends}
+            keyExtractor={(u)=>u}
+            showsHorizontalScrollIndicator={false}
+            ItemSeparatorComponent={() => <View style={{ width:10 }} />}
+            renderItem={({item: uid})=>(
+              <TouchableOpacity
+                onPress={()=>openChatWith(uid)}
+                style={{ padding:10, borderRadius:12, backgroundColor:'#13161c', borderWidth:1, borderColor:'#232838' }}>
+                <View style={{ flexDirection:'row', alignItems:'center', gap:8 }}>
+                  <Avatar uid={uid} size={28} />
+                  <Text style={{ color:'#fff', fontWeight:'700' }}>{nameFor(uid)}</Text>
                 </View>
-              </View>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+                <Text style={{ color:'#9aa0a6', fontSize:12, marginTop:2 }}>Mensaje</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
 
-      {/* Notificaciones (igual que antes) */}
-      <View style={{ flex:1, paddingHorizontal:16, paddingVertical:8 }}>
-        <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Notificaciones</Text>
-        <FlatList
-          data={items}
-          keyExtractor={(n)=>n.id}
-          ItemSeparatorComponent={() => <View style={{ height:1, backgroundColor:'#1f2230' }} />}
-          renderItem={({item:n})=>{
-            const u = n.fromUid;
-            const title =
-              n.type==='like' ? 'Le gustó tu video' :
-              n.type==='comment' ? 'Comentó tu video' :
-              n.type==='follow' ? 'Comenzó a seguirte' :
-              'Te envió un mensaje';
-
-            const onPress = () => {
-              if (n.type === 'message') openChatWith(u);
-              else router.push(`/profile/${u}`);
-            };
-
+        {/* Mensajes */}
+        <View style={{ paddingHorizontal:16, paddingVertical:8 }}>
+          <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Mensajes</Text>
+          {threads.map(t=>{
+            const [a,b] = String(t.id).split('_');
+            const other = a===me ? b : a;
+            const preview =
+              t.lastText
+                ? (t.lastFromUid === me ? `Tú: ${t.lastText}` : t.lastText)
+                : 'Nuevo chat';
             return (
-              <TouchableOpacity onPress={onPress} style={{ paddingVertical:12 }}>
+              <TouchableOpacity key={t.id}
+                onPress={()=>router.push({ pathname:'/chat/[threadId]', params:{ threadId: t.id } })}
+                style={{ paddingVertical:12, borderBottomColor:'#1f2230', borderBottomWidth:1 }}>
                 <View style={{ flexDirection:'row', alignItems:'center', gap:10 }}>
-                  <Avatar uid={u} size={36} />
+                  <Avatar uid={other} size={34} />
                   <View style={{ flex:1 }}>
-                    <Text style={{ color:'#fff', fontWeight:'800' }}>
-                      {nameFor(u)} <Text style={{ color:'#c4c7ce', fontWeight:'600' }}>• {title}</Text>
-                    </Text>
-                    {!!n.text && <Text style={{ color:'#9aa0a6' }} numberOfLines={1}>{n.text}</Text>}
+                    <Text style={{ color:'#fff', fontWeight:'700' }}>{nameFor(other)}</Text>
+                    <Text style={{ color:'#9aa0a6' }} numberOfLines={1}>{preview}</Text>
                   </View>
                 </View>
               </TouchableOpacity>
             );
-          }}
-        />
-      </View>
+          })}
+        </View>
 
-      <BottomNav />
-    </View>
+        {/* Notificaciones */}
+        <View style={{ flex:1, paddingHorizontal:16, paddingVertical:8 }}>
+          <Text style={{ color:'#fff', fontWeight:'800', marginBottom:8 }}>Notificaciones</Text>
+          <FlatList
+            data={items}
+            keyExtractor={(n)=>n.id}
+            ItemSeparatorComponent={() => <View style={{ height:1, backgroundColor:'#1f2230' }} />}
+            renderItem={({item:n})=>{
+              const u = n.fromUid;
+              const title =
+                n.type==='like' ? 'Le gustó tu video' :
+                n.type==='comment' ? 'Comentó tu video' :
+                n.type==='follow' ? 'Comenzó a seguirte' :
+                'Te envió un mensaje';
+
+              const onPress = () => {
+                if (n.type === 'message') openChatWith(u);
+                else router.push(`/profile/${u}`);
+              };
+
+              return (
+                <TouchableOpacity onPress={onPress} style={{ paddingVertical:12 }}>
+                  <View style={{ flexDirection:'row', alignItems:'center', gap:10 }}>
+                    <Avatar uid={u} size={36} />
+                    <View style={{ flex:1 }}>
+                      <Text style={{ color:'#fff', fontWeight:'800' }}>
+                        {nameFor(u)} <Text style={{ color:'#c4c7ce', fontWeight:'600' }}>• {title}</Text>
+                      </Text>
+                      {!!n.text && <Text style={{ color:'#9aa0a6' }} numberOfLines={1}>{n.text}</Text>}
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              );
+            }}
+          />
+        </View>
+
+        <BottomNav />
+      </View>
+    </SafeAreaView>
   );
 }

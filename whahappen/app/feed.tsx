@@ -500,7 +500,6 @@ export default function Feed() {
             activeOpacity={0.8}
           >
             <Ionicons name="share-social-outline" size={26} color="#fff" />
-            <Text style={{ color: "#fff", fontWeight: "800", marginTop: 4, fontSize: 12 }}>Compartir</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -546,6 +545,36 @@ export default function Feed() {
           <Ionicons name="chevron-forward" size={18} color="#9aa0a6" />
         </TouchableOpacity>
       )}
+
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: "absolute",
+            top: (insets.top || 12) + 8,
+            right: 12,
+            zIndex: 40,
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => router.push("/search")}
+            activeOpacity={0.9}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={{
+              backgroundColor: "#101318",
+              borderWidth: 1,
+              borderColor: "#252a36",
+              padding: 10,
+              borderRadius: 999,
+              shadowColor: "#000",
+              shadowOpacity: 0.25,
+              shadowOffset: { width: 0, height: 2 },
+              shadowRadius: 6,
+              elevation: 3,
+            }}
+          >
+            <Ionicons name="search" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
 
       <FlatList
         data={items}

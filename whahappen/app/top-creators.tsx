@@ -165,9 +165,12 @@ function Header({
   monthKey: string;
 }) {
   const insets = useSafeAreaInsets();
+  const r = useRouter();
   const TOP = (insets.top || 12) + 8;
+
   return (
     <>
+      {/* Barra superior (back + títulos) */}
       <View
         style={{
           position: "absolute",
@@ -180,59 +183,106 @@ function Header({
           justifyContent: "space-between",
         }}
       >
-        <TouchableOpacity onPress={onBack} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+        <TouchableOpacity
+          onPress={onBack}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
           <Ionicons name="chevron-back" size={28} color={T.text} />
         </TouchableOpacity>
 
         <View style={{ alignItems: "center", flex: 1 }}>
-          <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>Top de creadores</Text>
+          <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>
+            Top de creadores
+          </Text>
           <Text style={{ color: T.textDim, marginTop: 2, fontSize: 12 }}>
-            {tab === "day" ? "Ranking diario · datos en vivo" : `Ranking mensual · ${monthKey}`}
+            {tab === "day"
+              ? "Ranking diario · datos en vivo"
+              : `Ranking mensual · ${monthKey}`}
           </Text>
         </View>
 
         <View style={{ width: 28 }} />
       </View>
 
-      {/* Chips */}
+      {/* Chips + botón Fondo en una sola fila */}
       <View
         style={{
           position: "absolute",
-          top: TOP + 46,
+          top: TOP + 60,
           left: 12,
           right: 12,
           zIndex: 20,
           flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
           gap: 8,
         }}
       >
+        {/* Grupo de chips */}
+        <View style={{ flexDirection: "row", gap: 8, flexShrink: 1 }}>
+          <TouchableOpacity
+            onPress={() => setTab("day")}
+            activeOpacity={0.9}
+            style={{
+              paddingHorizontal: 20,
+              paddingVertical: 8,
+              borderRadius: 10,
+              backgroundColor: tab === "day" ? "#fff" : T.soft,
+              borderWidth: 1,
+              borderColor: tab === "day" ? "#fff" : T.cardBorder,
+            }}
+          >
+            <Text
+              style={{
+                color: tab === "day" ? "#000" : "#fff",
+                fontWeight: "900",
+              }}
+            >
+              Hoy
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => setTab("month")}
+            activeOpacity={0.9}
+            style={{
+              paddingHorizontal: 20,
+              paddingVertical: 8,
+              borderRadius: 10,
+              backgroundColor: tab === "month" ? "#fff" : T.soft,
+              borderWidth: 1,
+              borderColor: tab === "month" ? "#fff" : T.cardBorder,
+            }}
+          >
+            <Text
+              style={{
+                color: tab === "month" ? "#000" : "#fff",
+                fontWeight: "900",
+              }}
+            >
+              Mes
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Botón Fondo de Creadores */}
         <TouchableOpacity
-          onPress={() => setTab("day")}
+          onPress={() => r.push("/creator-fund")}
           activeOpacity={0.9}
-          style={{
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-            borderRadius: 999,
-            backgroundColor: tab === "day" ? "#fff" : T.soft,
-            borderWidth: 1,
-            borderColor: tab === "day" ? "#fff" : T.cardBorder,
-          }}
+          style={{ flexShrink: 0 }}
         >
-          <Text style={{ color: tab === "day" ? "#000" : "#fff", fontWeight: "900" }}>Hoy</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setTab("month")}
-          activeOpacity={0.9}
-          style={{
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-            borderRadius: 999,
-            backgroundColor: tab === "month" ? "#fff" : T.soft,
-            borderWidth: 1,
-            borderColor: tab === "month" ? "#fff" : T.cardBorder,
-          }}
-        >
-          <Text style={{ color: tab === "month" ? "#000" : "#fff", fontWeight: "900" }}>Mes</Text>
+          <View
+            style={{
+              backgroundColor: "#fff",
+              paddingVertical: 8,
+              paddingHorizontal: 12,
+              borderRadius: 10,
+            }}
+          >
+            <Text style={{ color: "#000", fontWeight: "900" }}>
+              Recompensas
+            </Text>
+          </View>
         </TouchableOpacity>
       </View>
     </>
@@ -278,7 +328,7 @@ function Row({
     <View
       style={{
         marginHorizontal: 16,
-        marginBottom: 12,
+        marginTop: 25,
         backgroundColor: T.card,
         borderRadius: 16,
         borderWidth: 1,

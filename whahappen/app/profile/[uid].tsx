@@ -1,8 +1,8 @@
 // app/profile/[uid].tsx
 import React, { useEffect, useState, useCallback, memo } from 'react';
-import { View, Text, Dimensions, FlatList, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, Dimensions, FlatList, TouchableOpacity, Alert, StatusBar, Platform } from 'react-native';
 import { useLocalSearchParams, useRouter, useSegments } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,14 +21,14 @@ const { width } = Dimensions.get('window');
 const GAP = 8, PADDING_H = 16;
 const TILE = Math.floor((width - PADDING_H * 2 - GAP * 2) / 3);
 
-const BackgroundDecor = memo(() => (
-  <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}>
-    <LinearGradient colors={['rgba(124,77,255,0.28)', 'rgba(124,77,255,0.0)']} start={{ x: 0.1, y: 0.0 }} end={{ x: 0.9, y: 1 }}
-      style={{ position: 'absolute', width: 320, height: 320, borderRadius: 160, top: -80, left: -80, transform: [{ rotate: '18deg' }] }} />
-    <LinearGradient colors={['rgba(255,77,222,0.22)', 'rgba(255,77,222,0.0)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-      style={{ position: 'absolute', width: 260, height: 260, borderRadius: 130, top: 220, right: -70, transform: [{ rotate: '-12deg' }] }} />
+const BackgroundDecor = () => (
+  <View pointerEvents="none" style={{ position:'absolute', left:0, right:0, top:0, bottom:0 }}>
+    <LinearGradient colors={['rgba(124,77,255,0.28)','rgba(124,77,255,0.0)']} start={{x:0.1,y:0}} end={{x:0.9,y:1}}
+      style={{ position:'absolute', width:320, height:320, borderRadius:160, top:-80, left:-80 }} />
+    <LinearGradient colors={['rgba(255,77,222,0.22)','rgba(255,77,222,0.0)']} start={{x:0,y:0}} end={{x:1,y:1}}
+      style={{ position:'absolute', width:260, height:260, borderRadius:130, top: 220, right:-70 }} />
   </View>
-));
+);
 
 type UserDoc = { handle?: string; displayName?: string; bio?: string; photoURL?: string | null; };
 type Post = { id: string; uid: string; videoURL: string; };
@@ -121,9 +121,7 @@ export default function ProfileScreen() {
     if (!id) { Alert.alert('No se pudo crear el chat'); return; }
 
     try {
-      // navegación robusta
       router.push({ pathname: '/chat/[threadId]', params: { threadId: id } });
-      // fallback por si tuvieras grupos de rutas
       setTimeout(() => {
         router.push(`/chat/${id}`);
       }, 30);
@@ -137,7 +135,7 @@ export default function ProfileScreen() {
   const name = user?.displayName || '';
 
   const Header = memo(() => (
-    <View style={{ paddingHorizontal: PADDING_H, marginTop: (insets.top || 12) + 42, marginBottom: 14 }}>
+    <View style={{ paddingHorizontal: PADDING_H, marginTop: (insets.top || 12), marginBottom: 14 }}>
       <BlurView intensity={40} tint="dark" style={{ borderRadius: 22, overflow: 'hidden' }}>
         <View style={{ borderRadius: 22, borderWidth: 1, borderColor: '#1f2126', padding: 18, alignItems: 'center', backgroundColor: '#0e1015aa' }}>
           <Avatar uid={String(uid)} size={100} />
@@ -186,26 +184,29 @@ export default function ProfileScreen() {
   ));
 
   return (
-    <LinearGradient colors={['#0b0b0d', '#000']} style={{ flex: 1 }}>
-      <BackgroundDecor />
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }} edges={['top','bottom']}>
+      <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+      <LinearGradient colors={['#000', '#000']} style={{ flex: 1, paddingTop: Platform.OS === 'android' ? 0 : 0 }}>
+        <BackgroundDecor />
 
-      <FlatList
-        data={posts}
-        keyExtractor={(x) => x.id}
-        numColumns={3}
-        columnWrapperStyle={{ gap: GAP, paddingHorizontal: PADDING_H }}
-        contentContainerStyle={{ paddingBottom: (insets.bottom || 12) + 24 }}
-        ListHeaderComponent={<Header />}
-        ListFooterComponent={<View style={{ height: 12 }} />}
-        ItemSeparatorComponent={() => <View style={{ height: GAP }} />}
-        renderItem={({ item }) => <GridItem item={item} />}
-        showsVerticalScrollIndicator={false}
-        removeClippedSubviews
-        initialNumToRender={9}
-        windowSize={7}
-      />
+        <FlatList
+          data={posts}
+          keyExtractor={(x) => x.id}
+          numColumns={3}
+          columnWrapperStyle={{ gap: GAP, paddingHorizontal: PADDING_H }}
+          contentContainerStyle={{ paddingBottom: (insets.bottom || 12) + 24 }}
+          ListHeaderComponent={<Header />}
+          ListFooterComponent={<View style={{ height: 12 }} />}
+          ItemSeparatorComponent={() => <View style={{ height: GAP }} />}
+          renderItem={({ item }) => <GridItem item={item} />}
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews
+          initialNumToRender={9}
+          windowSize={7}
+        />
 
-      <BottomNav />
-    </LinearGradient>
+        <BottomNav />
+      </LinearGradient>
+    </SafeAreaView>
   );
 }

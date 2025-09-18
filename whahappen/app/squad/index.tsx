@@ -30,6 +30,7 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { auth, db } from "../../lib/firebase";
 import Avatar from "../../components/Avatar";
+import BottomNav from "../../components/BottomNav";
 
 const T = {
   bg: "#000",
@@ -569,6 +570,10 @@ export default function SquadHub() {
           </>
         )}
       </ScrollView>
+      {/* Bottom nav */}
+            <View pointerEvents="box-none" style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+              <BottomNav />
+            </View>
     </View>
   );
 }

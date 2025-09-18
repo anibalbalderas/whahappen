@@ -54,20 +54,30 @@ export default function Search() {
   const r = useRouter();
 
   const [qtext, setQtext] = useState('');
-  const [tab, setTab] = useState<'top'|'videos'|'users'>('top');
+  const [tab, setTab] = useState<'top'|'users'>('top');
 
   const [videos, setVideos] = useState<Post[]>([]);
   const [users, setUsers] = useState<UserDoc[]>([]);
   const [authors, setAuthors] = useState<Record<string, UserDoc>>({});
   const [loading, setLoading] = useState(false);
 
-  // autoplay control
-  const [active, setActive] = useState(0);
-  const viewabilityConfig = { viewAreaCoveragePercentThreshold: 80 };
-  const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
-    const idx = viewableItems?.[0]?.index ?? 0;
-    setActive(idx);
+  // altura del overlay (Header + Tabs) para dar padding a las listas
+  const [topH, setTopH] = useState(0);
+  const TOP_PAD = topH || (insets.top || 12) + 6 + 10 + 42; // fallback
+
+  // visibilidad por celda en grid (reproduce solo lo visible)
+  const [gridVisible, setGridVisible] = useState<Set<string>>(new Set());
+  const lastVisibleIdsRef = useRef<string[]>([]);
+  const onViewableItemsChangedGrid = useRef(({ viewableItems }: any) => {
+    const ids = viewableItems.map((v: any) => v.item?.id).filter(Boolean);
+    const prev = lastVisibleIdsRef.current;
+    if (ids.length === prev.length && ids.every((id: string, i: number) => id === prev[i])) {
+      return; // sin cambios → evita renders extra
+    }
+    lastVisibleIdsRef.current = ids;
+    setGridVisible(new Set(ids));
   }).current;
+  const viewabilityConfigGrid = useRef({ itemVisiblePercentThreshold: 60 }).current;
 
   const actualTerms = useMemo(() => tokenize(qtext.replace(/^[@#]/, '')), [qtext]);
 
@@ -140,7 +150,6 @@ export default function Search() {
       } else {
         await Promise.all([runVideos(), runUsers()]);
       }
-      setActive(0);
     } finally {
       setLoading(false);
     }
@@ -185,17 +194,17 @@ export default function Search() {
 
   const Tabs = () => (
     <View style={{ flexDirection:'row', gap:12, paddingHorizontal:12, paddingBottom:10 }}>
-      {(['top','videos','users'] as const).map(t => {
+      {(['top','users'] as const).map(t => {
         const activeTab = tab === t;
         return (
           <TouchableOpacity key={t} onPress={()=>setTab(t)} activeOpacity={0.8}>
             <View style={{
-              paddingHorizontal:14, paddingVertical:8, borderRadius:999,
+              paddingHorizontal:14, paddingVertical:8, borderRadius:10,
               backgroundColor: activeTab ? '#ffffff' : '#14161c', borderWidth:1,
               borderColor: activeTab ? '#fff' : '#222633'
             }}>
               <Text style={{ color: activeTab ? '#000' : '#cfd3db', fontWeight:'900', fontSize:12 }}>
-                {t === 'top' ? 'Top' : t === 'videos' ? 'Videos' : 'Usuarios'}
+                {t === 'top' ? 'Top' : 'Usuarios'}
               </Text>
             </View>
           </TouchableOpacity>
@@ -204,15 +213,23 @@ export default function Search() {
     </View>
   );
 
-  // ---- Grid (por si quieres mantenerlo en Top) ----
+  // ---- Grid (Top) con previews silenciosas ----
   const VideosGrid = () => (
     <FlatList
       data={videos}
       keyExtractor={(x)=>x.id}
       numColumns={COLS}
       columnWrapperStyle={{ gap: TILE_GAP }}
-      contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: (insets.bottom||12)+80 }}
+      contentContainerStyle={{ paddingTop: TOP_PAD, paddingHorizontal: 12, paddingBottom: (insets.bottom||12)+80 }}
       ItemSeparatorComponent={() => <View style={{ height: TILE_GAP }} />}
+      onViewableItemsChanged={onViewableItemsChangedGrid}
+      viewabilityConfig={viewabilityConfigGrid}
+      keyboardShouldPersistTaps="handled"
+      removeClippedSubviews
+      windowSize={7}
+      maxToRenderPerBatch={8}
+      updateCellsBatchingPeriod={40}
+      initialNumToRender={12}
       renderItem={({ item }) => (
         <TouchableOpacity
           onPress={()=>r.push(`/watch/${item.uid}?sid=${item.id}`)}
@@ -222,7 +239,17 @@ export default function Search() {
             backgroundColor: '#0f1116', borderWidth: 1, borderColor: '#1f232c'
           }}
         >
-          {/* Si tienes thumbnails, colócalos aquí con <Image />; de momento solo info */}
+          {/* Preview silenciosa (auto-play solo si es visible) */}
+          <Video
+            source={{ uri: item.videoURL }}
+            style={{ width: '100%', height: '100%' }}
+            resizeMode="cover"
+            shouldPlay={gridVisible.has(item.id)}
+            isMuted
+            isLooping
+            useNativeControls={false}
+          />
+          {/* overlays */}
           <View style={{ position:'absolute', top:6, left:6, right:6 }}>
             <Text style={{ color:'#fff', fontWeight:'900' }} numberOfLines={1}>{handleFor(item.uid)}</Text>
           </View>
@@ -235,73 +262,13 @@ export default function Search() {
     />
   );
 
-  // ---- VIDEOS: feed vertical con autoplay estilo TikTok ----
-  const VideosReels = () => {
-    // Altura de cada slide (deja espacio para header/tabs)
-    const headerTabsH = 120; // aprox; si quieres exacto, puedes medir con onLayout
-    const ITEM_H = height - headerTabsH;
-
-    return (
-      <FlatList
-        data={videos}
-        keyExtractor={(x)=>x.id}
-        pagingEnabled
-        showsVerticalScrollIndicator={false}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={viewabilityConfig}
-        getItemLayout={(_, index) => ({ length: ITEM_H, offset: ITEM_H * index, index })}
-        renderItem={({ item, index }) => {
-          const playing = index === active;
-          const tag = tagFor(item);
-          return (
-            <View style={{ width, height: ITEM_H, backgroundColor: 'black' }}>
-              <Video
-                source={{ uri: item.videoURL }}
-                style={{ width, height: ITEM_H }}
-                resizeMode="cover"
-                shouldPlay={playing}
-                isLooping
-                isMuted
-              />
-              {/* overlay info */}
-              <View style={{ position: 'absolute', left: 14, bottom: 80, right: 110 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                  <TouchableOpacity onPress={() => r.push(`/profile/${item.uid}`)}>
-                    <Text style={{ color: 'white', fontWeight: '900' }}>{handleFor(item.uid)}</Text>
-                  </TouchableOpacity>
-                  {!!tag && (
-                    <View style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: '#ffffff22' }}>
-                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>{tag}</Text>
-                    </View>
-                  )}
-                </View>
-                {!!item.caption && <Text style={{ color: 'white' }} numberOfLines={2}>{item.caption}</Text>}
-              </View>
-
-              {/* tap → abrir en watch */}
-              <View style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}>
-                <TouchableOpacity
-                  style={{ flex: 1 }}
-                  activeOpacity={1}
-                  onPress={() => r.push(`/watch/${item.uid}?sid=${item.id}`)}
-                >
-                  <View />
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        }}
-        contentContainerStyle={{ paddingBottom: (insets.bottom || 12) + 24 }}
-      />
-    );
-  };
-
   const UsersList = () => (
     <FlatList
       data={users}
       keyExtractor={(x)=>x.uid || x.handle || Math.random().toString(36)}
       ItemSeparatorComponent={() => <View style={{ height:10 }} />}
-      contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: (insets.bottom||12)+80 }}
+      contentContainerStyle={{ paddingTop: TOP_PAD, paddingHorizontal: 12, paddingBottom: (insets.bottom||12)+80 }}
+      keyboardShouldPersistTaps="handled"
       renderItem={({ item }) => {
         const handle = item.handle ? `@${item.handle}` : `@user-${(item.uid||'').slice(0,5)}`;
         return (
@@ -327,17 +294,25 @@ export default function Search() {
 
   const renderTab = () => {
     if (tab === 'users') return <UsersList />;
-    if (tab === 'videos') return <VideosReels />; // ← autoplay feed
-    // Top: muestra grid compacto de videos (preview rápido)
-    return <VideosGrid />;
+    return <VideosGrid />; // Top
   };
 
   return (
     <View style={{ flex:1, backgroundColor:'#000' }}>
       <BackgroundDecor />
-      <Header />
-      <Tabs />
+
+      {/* CONTENIDO */}
       {renderTab()}
+
+      {/* OVERLAY: Header + Tabs arriba (tappable) */}
+      <View
+        pointerEvents="box-none"
+        style={{ position:'absolute', top:0, left:0, right:0, zIndex:40 }}
+        onLayout={e => setTopH(e.nativeEvent.layout.height)}
+      >
+        <Header />
+        <Tabs />
+      </View>
     </View>
   );
 }
