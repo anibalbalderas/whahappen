@@ -183,12 +183,6 @@ function Header({
           justifyContent: "space-between",
         }}
       >
-        <TouchableOpacity
-          onPress={onBack}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="chevron-back" size={28} color={T.text} />
-        </TouchableOpacity>
 
         <View style={{ alignItems: "center", flex: 1 }}>
           <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>

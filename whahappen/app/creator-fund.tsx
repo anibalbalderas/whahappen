@@ -1,11 +1,11 @@
 // app/top/creator-fund.tsx
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, TouchableOpacity, ScrollView, StatusBar } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { auth, db } from "../lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { useRouter } from "expo-router";
 
 const BackgroundDecor = () => (
@@ -34,6 +34,11 @@ type PublicCurrent = {
   revenueShare: number;
 };
 
+function daysInMonth(yyyymm: string) {
+  const [y, m] = yyyymm.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
 export default function CreatorFund() {
   const insets = useSafeAreaInsets();
   const r = useRouter();
@@ -50,16 +55,82 @@ export default function CreatorFund() {
 
   useEffect(() => {
     (async () => {
-      const liveSnap = await getDoc(doc(db, "public", "creatorFund", "state", "current"));
-      setLive((liveSnap.data() as any) || null);
+      // 1) Estado público del fondo
+      const curSnap = await getDoc(doc(db, "public", "creatorFund", "state", "current"));
+      const base: PublicCurrent = {
+        yyyymm,
+        poolProjected: 10000,
+        rateMXN: 0,
+        totalPoints: 0,
+        floorMXN: 10000,
+        revenueShare: 0.10,
+        ...(curSnap.data() as any),
+      };
+      setLive(base);
 
+      // 2) Billetera
       if (me) {
-        const ptsSnap = await getDoc(doc(db, "metrics", "monthly", yyyymm, "creatorPoints", me));
-        setMyPoints(Number((ptsSnap.data() as any)?.points || 0));
-
-        const wSnap = await getDoc(doc(db, "wallets", me));
-        setBalance(Number((wSnap.data() as any)?.balanceMXN || 0));
+        const w = await getDoc(doc(db, "wallets", me));
+        setBalance(Number((w.data() as any)?.balanceMXN || 0));
       }
+
+      // 3) Mis puntos mensuales (metrics_monthly)
+      let myMonthly = 0;
+      if (me) {
+        const m = await getDoc(doc(db, "metrics_monthly", yyyymm, "creatorPoints", me));
+        if (m.exists()) {
+          myMonthly = Number((m.data() as any)?.points || 0);
+        }
+      }
+
+      // 4) Fallback: si no hay metrics_monthly, sumar desde leaderboardDaily
+      if (myMonthly === 0 && me) {
+        const last = daysInMonth(yyyymm);
+        let acc = 0;
+        for (let i = 1; i <= last; i++) {
+          const iso = `${yyyymm}-${String(i).padStart(2, "0")}`;
+          const snap = await getDoc(doc(db, "leaderboardDaily", iso));
+          const arr = ((snap.data() as any)?.topCreators || []) as any[];
+          const mine = arr.find((r) => r?.uid === me);
+          if (mine) {
+            acc +=
+              (Number(mine.views || 0) * 1) +
+              (Number(mine.likes || 0) * 5) +
+              (Number(mine.comments || 0) * 8) +
+              (Number(mine.reposts || 0) * 12) +
+              (Number(mine.posts || 0) * 20);
+          }
+        }
+        myMonthly = acc;
+      }
+      setMyPoints(myMonthly);
+
+      // 5) Calcular rate provisional si el público viene en 0
+      let totalPts = Number(base.totalPoints || 0);
+      if (!totalPts) {
+        try {
+          const col = collection(db, "metrics_monthly", yyyymm, "creatorPoints");
+          const snaps = await getDocs(col);
+          snaps.forEach((d) => (totalPts += Number((d.data() as any)?.points || 0)));
+        } catch {
+          totalPts = 0;
+        }
+      }
+
+      const pool =
+        Number(base.poolProjected || 0) > 0 ? Number(base.poolProjected) : 10000;
+      const rate =
+        Number(base.rateMXN || 0) > 0
+          ? Number(base.rateMXN)
+          : totalPts > 0
+          ? Number((pool / totalPts).toFixed(6))
+          : 0;
+
+      setLive((prev) =>
+        prev
+          ? { ...prev, poolProjected: pool, rateMXN: rate, totalPoints: totalPts }
+          : { ...base, poolProjected: pool, rateMXN: rate, totalPoints: totalPts }
+      );
     })().catch(() => {});
   }, [me, yyyymm]);
 
@@ -77,7 +148,7 @@ export default function CreatorFund() {
       <LinearGradient colors={["#000", "#000"]} style={{ flex: 1 }}>
         <BackgroundDecor />
 
-        {/* Header fijo */}
+        {/* Header */}
         <View
           style={{
             position: "absolute",
@@ -90,11 +161,7 @@ export default function CreatorFund() {
             justifyContent: "space-between",
           }}
         >
-          <TouchableOpacity
-            onPress={goBack}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            activeOpacity={0.9}
-          >
+          <TouchableOpacity onPress={goBack} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} activeOpacity={0.9}>
             <Ionicons name="chevron-back" size={28} color="#fff" />
           </TouchableOpacity>
 
@@ -110,13 +177,13 @@ export default function CreatorFund() {
 
         <ScrollView
           contentContainerStyle={{
-            paddingTop: TOP + 20, // espacio para el header
+            paddingTop: TOP + 20,
             paddingBottom: (insets.bottom || 12) + 24,
             paddingHorizontal: 16,
           }}
           showsVerticalScrollIndicator={false}
         >
-          {/* Tarjeta resumen mes en curso */}
+          {/* Resumen del mes */}
           <View
             style={{
               backgroundColor: "#111319",
@@ -132,15 +199,15 @@ export default function CreatorFund() {
             </Text>
             <Text style={{ color: "#c6cbd2" }}>Pool proyectado</Text>
             <Text style={{ color: "#fff", fontWeight: "900", fontSize: 28, marginBottom: 6 }}>
-              ${live?.poolProjected?.toFixed(2) ?? "—"} MXN
+              ${Number(live?.poolProjected ?? 10000).toFixed(2)} MXN
             </Text>
             <Text style={{ color: "#c6cbd2" }}>Rate estimado</Text>
             <Text style={{ color: "#fff", fontWeight: "900", fontSize: 22, marginBottom: 10 }}>
-              ${live?.rateMXN?.toFixed(4) ?? "0"} por punto
+              ${Number(live?.rateMXN ?? 0).toFixed(6)} por punto
             </Text>
             <Text style={{ color: "#9aa0a6" }}>
-              Piso: ${live?.floorMXN ?? 10000} MXN • {Math.round((live?.revenueShare ?? 0.1) * 100)}% de ingresos
-              (el mayor).
+              Piso: ${Number(live?.floorMXN ?? 10000).toFixed(0)} MXN •{" "}
+              {Math.round((live?.revenueShare ?? 0.1) * 100)}% de ingresos (el mayor).
             </Text>
           </View>
 
@@ -173,7 +240,7 @@ export default function CreatorFund() {
             </View>
           </View>
 
-          {/* Cómo ganar más puntos */}
+          {/* Cómo se calculan los puntos */}
           <View
             style={{
               backgroundColor: "#0f1117",
@@ -184,13 +251,9 @@ export default function CreatorFund() {
             }}
           >
             <Text style={{ color: "#fff", fontWeight: "800", marginBottom: 8 }}>Cómo se calculan los puntos</Text>
-            <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>
-              • 1 view válido (+1 extra ≥50% retención, +2 si ≥85%)
-            </Text>
+            <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>• 1 view válido (+1 extra ≥50% retención, +2 si ≥85%)</Text>
             <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>• Like de otra persona: +5</Text>
-            <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>
-              • Comentario (máx. 2 por usuario/video): +8
-            </Text>
+            <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>• Comentario (máx. 2 por usuario/video): +8</Text>
             <Text style={{ color: "#c6cbd2", marginBottom: 6 }}>• Share medible: +12</Text>
             <Text style={{ color: "#c6cbd2" }}>• Bono por subir el reto del día: +20</Text>
           </View>

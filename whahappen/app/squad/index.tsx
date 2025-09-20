@@ -18,14 +18,12 @@ import { useRouter } from "expo-router";
 import {
   doc,
   getDoc,
-  setDoc,
   updateDoc,
   onSnapshot,
-  arrayUnion,
-  arrayRemove,
   serverTimestamp,
   collection,
   addDoc,
+  runTransaction,
 } from "firebase/firestore";
 import { LinearGradient } from "expo-linear-gradient";
 import { auth, db } from "../../lib/firebase";
@@ -37,7 +35,6 @@ const T = {
   card: "#0f1116",
   cardBorder: "#1f2230",
   soft: "#101318",
-  hair: "#181c24",
   text: "#fff",
   textDim: "#9aa0a6",
 };
@@ -121,69 +118,91 @@ function BubbleBackground() {
 export default function SquadHub() {
   const r = useRouter();
   const insets = useSafeAreaInsets();
+  const uid = auth.currentUser?.uid || null;
+
   const [me, setMe] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  const [mySquadId, setMySquadId] = useState<string | null>(null);
   const [squad, setSquad] = useState<any>(null);
   const [members, setMembers] = useState<any[]>([]);
+
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   const [nameDraft, setNameDraft] = useState("");
   const [joinCode, setJoinCode] = useState("");
 
-  const uid = auth.currentUser?.uid || null;
+  const squadUnsubRef = useRef<null | (() => void)>(null);
 
+  // Escucha mi usuario → actualiza mySquadId en vivo
   useEffect(() => {
-    let unsubUser: any;
-    let unsubSquad: any;
-
-    (async () => {
-      if (!uid) return;
-      const uRef = doc(db, "users", uid);
-      unsubUser = onSnapshot(uRef, async (snap) => {
-        const u = snap.data() || {};
-        setMe(u);
-        const sId = u.squadId || null;
-        if (!sId) {
-          setSquad(null);
-          setMembers([]);
-          setLoading(false);
-          return;
-        }
-        const sRef = doc(db, "squads", sId);
-        unsubSquad?.();
-        unsubSquad = onSnapshot(sRef, async (s) => {
-          const data = s.data();
-          setSquad(data ? { id: s.id, ...data } : null);
-          const arr: any[] = [];
-          for (const m of data?.members || []) {
-            try {
-              const ms = await getDoc(doc(db, "users", m));
-              arr.push({ uid: m, ...(ms.data() || {}) });
-            } catch {}
-          }
-          setMembers(arr);
-          setLoading(false);
-        });
-      });
-    })();
-
-    return () => {
-      unsubUser?.();
-      unsubSquad?.();
-    };
+    if (!uid) return;
+    const uRef = doc(db, "users", uid);
+    const unsub = onSnapshot(uRef, (snap) => {
+      const u = snap.data() || {};
+      setMe(u);
+      setMySquadId(u?.squadId || null);
+    });
+    return () => unsub();
   }, [uid]);
 
-  // Crear squad (FIX permisos: NO mandamos campos de racha)
+  // Con mySquadId, escucha el squad en vivo
+  useEffect(() => {
+    squadUnsubRef.current?.();
+    squadUnsubRef.current = null;
+    setMembers([]);
+    setLoading(true);
+
+    if (!mySquadId) {
+      setSquad(null);
+      setLoading(false);
+      return;
+    }
+
+    const sRef = doc(db, "squads", mySquadId);
+    const unsub = onSnapshot(sRef, async (s) => {
+      const data = s.data();
+      if (!data) {
+        setSquad(null);
+        setMembers([]);
+        setLoading(false);
+        return;
+      }
+      const base = { id: s.id, ...data };
+      setSquad(base);
+
+      // Carga perfiles de miembros (paralelo)
+      try {
+        const arr = await Promise.all(
+          (data.members || []).map(async (m: string) => {
+            const ms = await getDoc(doc(db, "users", m));
+            return { uid: m, ...(ms.data() || {}) };
+          })
+        );
+        setMembers(arr);
+      } catch {
+        setMembers([]);
+      }
+      setLoading(false);
+    });
+    squadUnsubRef.current = unsub;
+
+    return () => {
+      squadUnsubRef.current?.();
+      squadUnsubRef.current = null;
+    };
+  }, [mySquadId]);
+
+  // Crear squad (campos permitidos; sin racha)
   const createSquad = async () => {
     try {
       if (!uid) throw new Error("No hay usuario.");
       const n = nameDraft.trim();
-      if (!n) return Alert.alert("Nombre requerido", "Ponle un nombre a tu squad.");
+      if (!n) return
       setCreating(true);
 
-      // Solo los campos permitidos por reglas en CREATE
       const sDoc = await addDoc(collection(db, "squads"), {
         name: n,
         owner: uid,
@@ -192,57 +211,75 @@ export default function SquadHub() {
       });
 
       await updateDoc(doc(db, "users", uid), { squadId: sDoc.id });
+
+      // Optimista
       setNameDraft("");
-      Alert.alert("Listo", `Squad creado. Código: ${sDoc.id}`);
+      setMySquadId(sDoc.id);
     } catch (e: any) {
-      Alert.alert("Ups", e?.message || "No se pudo crear el squad.");
     } finally {
       setCreating(false);
     }
   };
 
-  // Unirse a squad
+  // Unirse (transacción para cumplir reglas + optimista)
   const joinSquad = async () => {
     try {
       if (!uid) throw new Error("No hay usuario.");
       const code = joinCode.trim();
       if (!code) return;
       setJoining(true);
-      const sRef = doc(db, "squads", code);
-      const sSnap = await getDoc(sRef);
-      if (!sSnap.exists()) throw new Error("Código inválido.");
-      const data = sSnap.data()!;
 
-      if ((data.members || []).includes(uid)) {
-        await updateDoc(doc(db, "users", uid), { squadId: code });
-      } else {
-        await updateDoc(sRef, { members: arrayUnion(uid) });
-        await updateDoc(doc(db, "users", uid), { squadId: code });
-      }
+      const sRef = doc(db, "squads", code);
+      await runTransaction(db, async (tx) => {
+        const sSnap = await tx.get(sRef);
+        if (!sSnap.exists()) throw new Error("Código inválido.");
+        const data = sSnap.data() as any;
+        const prev: string[] = Array.isArray(data.members) ? data.members : [];
+        if (!prev.includes(uid)) {
+          const next = [...prev, uid];
+          tx.update(sRef, { members: next } as any);
+        }
+      });
+
+      await updateDoc(doc(db, "users", uid), { squadId: code });
+
+      // Optimista
       setJoinCode("");
-      Alert.alert("¡Bien!", "Te uniste al squad.");
+      setMySquadId(code);
     } catch (e: any) {
-      Alert.alert("Ups", e?.message || "No se pudo unir.");
     } finally {
       setJoining(false);
     }
   };
 
+  // Salirse (transacción + optimista)
   const leaveSquad = async () => {
     try {
       if (!uid || !squad?.id) return;
+      setLeaving(true);
       const sRef = doc(db, "squads", squad.id);
-      const rest = (squad.members || []).filter((m: string) => m !== uid);
 
-      // Si es owner y queda solo, reduce miembros (o podrías borrar si tus reglas lo permiten)
-      if (squad.owner === uid && rest.length === 0) {
-        await setDoc(sRef, { members: [] }, { merge: true });
-      } else {
-        await updateDoc(sRef, { members: arrayRemove(uid) });
-      }
+      await runTransaction(db, async (tx) => {
+        const sSnap = await tx.get(sRef);
+        if (!sSnap.exists()) throw new Error("El squad ya no existe.");
+        const data = sSnap.data() as any;
+
+        const prev: string[] = Array.isArray(data.members) ? data.members : [];
+        if (!prev.includes(uid)) return; // no-op
+
+        const next = prev.filter((m) => m !== uid);
+        // Escribe SOLO 'members' (cumple reglas relaxed de LEAVE)
+        tx.update(sRef, { members: next } as any);
+      });
+
       await updateDoc(doc(db, "users", uid), { squadId: null });
+
+      // Optimista
+      setMySquadId(null);
+      setSquad(null);
     } catch (e: any) {
-      Alert.alert("Ups", e?.message || "No se pudo salir.");
+    } finally {
+      setLeaving(false);
     }
   };
 
@@ -253,16 +290,12 @@ export default function SquadHub() {
       await Share.share({ message: msg });
     } catch {
       if (Platform.OS === "web") {
-        // fallback web
         try {
           // @ts-ignore
           await navigator.clipboard?.writeText(msg);
-          Alert.alert("Código copiado", msg);
         } catch {
-          Alert.alert("Código", msg);
         }
       } else {
-        Alert.alert("Código", msg);
       }
     }
   };
@@ -290,13 +323,11 @@ export default function SquadHub() {
         }}
       >
         <TouchableOpacity
-          onPress={() => ((r as any).canGoBack?.() ? r.back() : r.replace("/feed"))}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <Ionicons name="chevron-back" size={28} color="#fff" />
+
         </TouchableOpacity>
         <Text style={{ color: "#fff", fontWeight: "900" }}>Tu Squad</Text>
-        <View style={{ width: 28 }} />
+        <View style={{ width: 36 }} />
       </View>
 
       <ScrollView
@@ -337,7 +368,7 @@ export default function SquadHub() {
                 Código: <Text style={{ color: "#fff" }}>{squad.id}</Text>
               </Text>
 
-              {/* Stats pills */}
+              {/* Stats */}
               <View style={{ flexDirection: "row", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
                 <View
                   style={{
@@ -407,6 +438,7 @@ export default function SquadHub() {
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={leaveSquad}
+                  disabled={leaving}
                   style={{
                     paddingHorizontal: 12,
                     paddingVertical: 10,
@@ -414,9 +446,14 @@ export default function SquadHub() {
                     backgroundColor: "#121318",
                     borderWidth: 1,
                     borderColor: "#252a36",
+                    opacity: leaving ? 0.6 : 1,
                   }}
                 >
-                  <Text style={{ color: "#fff" }}>Salir del squad</Text>
+                  {leaving ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={{ color: "#fff" }}>Salir del squad</Text>
+                  )}
                 </TouchableOpacity>
               </View>
             </View>
@@ -570,10 +607,11 @@ export default function SquadHub() {
           </>
         )}
       </ScrollView>
+
       {/* Bottom nav */}
-            <View pointerEvents="box-none" style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
-              <BottomNav />
-            </View>
+      <View pointerEvents="box-none" style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+        <BottomNav />
+      </View>
     </View>
   );
 }
